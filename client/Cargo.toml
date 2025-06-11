@@ -1,0 +1,13 @@
+[package]
+name = "client"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "client"
+
+[dependencies]
+tokio = { version = "1.45.1", features = ["full"] }
+shared = { path = "../shared" }
+clap = { version = "4.5.38", features = ["derive"] }
+rand = "0.9.1"

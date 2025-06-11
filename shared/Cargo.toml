@@ -1,0 +1,9 @@
+[package]
+name = "shared"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+strum = "0.27.1"
+strum_macros = "0.27.1"
