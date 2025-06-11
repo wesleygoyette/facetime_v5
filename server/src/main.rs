@@ -1,3 +1,4 @@
+mod room;
 mod tcp_command_handler;
 mod tcp_handler;
 mod udp_handler;

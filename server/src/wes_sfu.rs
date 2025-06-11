@@ -1,7 +1,11 @@
 use core::error::Error;
+use std::{collections::HashMap, sync::Arc};
 
 use log::{error, info};
-use tokio::net::{TcpListener, UdpSocket};
+use tokio::{
+    net::{TcpListener, UdpSocket},
+    sync::Mutex,
+};
 
 use crate::{tcp_handler::TcpHandler, udp_handler::UdpHandler};
 
@@ -26,7 +30,13 @@ impl WeSFU {
                 return Ok(());
             });
 
+        let users = Arc::new(Mutex::new(Vec::new()));
+        let room_map = Arc::new(Mutex::new(HashMap::new()));
+
         loop {
+            let users = users.clone();
+            let room_map = room_map.clone();
+
             tokio::select! {
 
                 result = &mut udp_task => {
@@ -40,14 +50,18 @@ impl WeSFU {
 
                     tokio::spawn(async move {
 
+                        let users = users.clone();
+
                         let mut current_username_option = None;
 
-                        if let Err(e) = TcpHandler::handle_stream(tcp_socket, &mut current_username_option).await {
+                        if let Err(e) = TcpHandler::handle_stream(tcp_socket, &mut current_username_option, users.clone(), room_map).await {
 
                             error!("Error handling TcpSocket: {}", e);
                         }
 
                         if let Some(current_username) = current_username_option.take() {
+
+                            users.lock().await.retain(|user| user != &current_username);
                             info!("{} has disconnected", current_username);
                         }
                     });

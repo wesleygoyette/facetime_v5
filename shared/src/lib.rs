@@ -6,6 +6,9 @@ pub mod tcp_command_payload_type;
 pub const TCP_PORT: u16 = 8040;
 pub const UDP_PORT: u16 = 8039;
 
+pub type RoomID = [u8; 1];
+pub type StreamID = [u8; 1];
+
 pub const MAX_NAME_LENGTH: usize = 15;
 
 pub fn is_valid_name(name: &str) -> bool {

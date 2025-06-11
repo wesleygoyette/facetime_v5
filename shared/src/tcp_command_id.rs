@@ -37,15 +37,38 @@ tcp_command_id_enum! {
         HelloFromClient,
         HelloFromServer,
         ErrorResponse,
+        GetUserList,
+        UserList,
+        GetRoomList,
+        RoomList,
+        CreateRoom,
+        CreateRoomSuccess,
+        DeleteRoom,
+        DeleteRoomSuccess,
+        JoinRoom,
+        JoinRoomSuccess,
     }
 }
 
 impl TcpCommandId {
     pub fn get_payload_type(&self) -> TcpCommandPayloadType {
         match &self {
-            TcpCommandId::HelloFromClient => TcpCommandPayloadType::String,
             TcpCommandId::HelloFromServer => TcpCommandPayloadType::Simple,
+            TcpCommandId::GetUserList => TcpCommandPayloadType::Simple,
+            TcpCommandId::GetRoomList => TcpCommandPayloadType::Simple,
+            TcpCommandId::CreateRoomSuccess => TcpCommandPayloadType::Simple,
+            TcpCommandId::CreateRoom => TcpCommandPayloadType::String,
+            TcpCommandId::DeleteRoomSuccess => TcpCommandPayloadType::Simple,
+            TcpCommandId::JoinRoom => TcpCommandPayloadType::String,
+
+            TcpCommandId::HelloFromClient => TcpCommandPayloadType::String,
             TcpCommandId::ErrorResponse => TcpCommandPayloadType::String,
+            TcpCommandId::DeleteRoom => TcpCommandPayloadType::String,
+
+            TcpCommandId::UserList => TcpCommandPayloadType::StringList,
+            TcpCommandId::RoomList => TcpCommandPayloadType::StringList,
+
+            TcpCommandId::JoinRoomSuccess => TcpCommandPayloadType::Bytes,
         }
     }
 }

@@ -1,4 +1,7 @@
+mod call_interface;
+mod cli_display;
 mod client;
+mod pre_call_interface;
 
 use clap::Parser;
 use rand::{Rng, rng, seq::IndexedRandom};
@@ -23,15 +26,9 @@ async fn main() {
         None => generate_username(),
     };
 
-    let _client = match Client::connect(&args.server_address, &username).await {
-        Ok(client) => client,
-        Err(e) => {
-            eprintln!("Error connecting: {}", e);
-            return;
-        }
-    };
-
-    println!("Connected!");
+    if let Err(e) = Client::run(&args.server_address, &username).await {
+        eprintln!("{}", e);
+    }
 }
 
 fn generate_username() -> String {
