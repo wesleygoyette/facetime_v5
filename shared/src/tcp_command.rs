@@ -1,17 +1,14 @@
 use core::error::Error;
 use std::str::from_utf8;
 
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
-};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{
     received_tcp_command::ReceivedTcpCommand, tcp_command_id::TcpCommandId,
     tcp_command_payload_type::TcpCommandPayloadType,
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TcpCommand {
     Simple(TcpCommandId),
     String(TcpCommandId, String),
@@ -20,7 +17,13 @@ pub enum TcpCommand {
 }
 
 impl TcpCommand {
-    pub async fn write_to_tcp_stream(&self, stream: &mut TcpStream) -> Result<(), Box<dyn Error>> {
+    pub async fn write_to_stream<W>(
+        &self,
+        stream: &mut W,
+    ) -> Result<(), Box<dyn Error + Send + Sync>>
+    where
+        W: AsyncWrite + Unpin,
+    {
         match &self {
             TcpCommand::Simple(id) => {
                 stream.write_all(&[id.to_byte()]).await?;
@@ -37,7 +40,7 @@ impl TcpCommand {
             }
             TcpCommand::Bytes(id, payload) => {
                 if payload.len() > u8::MAX as usize {
-                    return Err("String payload too large".into());
+                    return Err("Bytes payload too large".into());
                 }
 
                 let mut bytes = vec![id.to_byte(), payload.len() as u8];
@@ -68,9 +71,12 @@ impl TcpCommand {
         Ok(())
     }
 
-    pub async fn read_from_tcp_stream(
-        stream: &mut TcpStream,
-    ) -> Result<ReceivedTcpCommand, Box<dyn Error>> {
+    pub async fn read_from_stream<R>(
+        stream: &mut R,
+    ) -> Result<ReceivedTcpCommand, Box<dyn Error + Send + Sync>>
+    where
+        R: AsyncRead + Unpin,
+    {
         let mut buf = [0; 1];
 
         let first_byte = match stream.read(&mut buf).await {

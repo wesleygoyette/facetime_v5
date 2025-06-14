@@ -1,24 +1,30 @@
 use core::error::Error;
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, vec};
 
 use log::{error, info, warn};
 use rand::fill;
 use shared::{
-    MAX_NAME_LENGTH, RoomID, is_valid_name, tcp_command::TcpCommand, tcp_command_id::TcpCommandId,
+    MAX_NAME_LENGTH, RoomID, StreamID, is_valid_name, tcp_command::TcpCommand,
+    tcp_command_id::TcpCommandId,
 };
-use tokio::{net::TcpStream, sync::Mutex};
+use tokio::{
+    net::TcpStream,
+    sync::{Mutex, RwLock, broadcast},
+};
 
 use crate::room::Room;
 
-pub struct TcpCommandHandler {}
+pub struct TcpCommandHandler;
 
 impl TcpCommandHandler {
     pub async fn handle_command(
         incoming_command: &TcpCommand,
         stream: &mut TcpStream,
-        users: Arc<Mutex<Vec<String>>>,
-        room_map: Arc<Mutex<HashMap<RoomID, Room>>>,
-    ) -> Result<(), Box<dyn Error>> {
+        current_username: &str,
+        users: Arc<RwLock<Vec<String>>>,
+        room_map: Arc<RwLock<HashMap<RoomID, Room>>>,
+        username_to_tcp_command_tx: Arc<Mutex<HashMap<String, broadcast::Sender<TcpCommand>>>>,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let result = match incoming_command {
             TcpCommand::Simple(TcpCommandId::GetUserList) => {
                 Self::handle_get_user_list(stream, users).await
@@ -33,7 +39,18 @@ impl TcpCommandHandler {
                 Self::handle_delete_room(stream, room_map, room_name).await
             }
             TcpCommand::String(TcpCommandId::JoinRoom, room_name) => {
-                Self::handle_join_room(stream, room_map, room_name).await
+                Self::handle_join_room(
+                    stream,
+                    current_username,
+                    room_map,
+                    room_name,
+                    username_to_tcp_command_tx,
+                )
+                .await
+            }
+            TcpCommand::Simple(TcpCommandId::LeaveRoom) => {
+                Self::handle_leave_room(current_username, room_map, username_to_tcp_command_tx)
+                    .await
             }
             _ => {
                 warn!("Unhandled command received: {:?}", incoming_command);
@@ -54,27 +71,27 @@ impl TcpCommandHandler {
 
     async fn handle_get_user_list(
         stream: &mut TcpStream,
-        users: Arc<Mutex<Vec<String>>>,
-    ) -> Result<(), Box<dyn Error>> {
+        users: Arc<RwLock<Vec<String>>>,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let users_snapshot = {
-            let guard = users.lock().await;
+            let guard = users.read().await;
             guard.clone()
         };
 
         info!("Sending user list with {} users", users_snapshot.len());
 
         TcpCommand::StringList(TcpCommandId::UserList, users_snapshot)
-            .write_to_tcp_stream(stream)
+            .write_to_stream(stream)
             .await
             .map_err(|e| format!("Failed to send user list: {}", e).into())
     }
 
     async fn handle_get_room_list(
         stream: &mut TcpStream,
-        room_map: Arc<Mutex<HashMap<RoomID, Room>>>,
-    ) -> Result<(), Box<dyn Error>> {
+        room_map: Arc<RwLock<HashMap<RoomID, Room>>>,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let room_names = {
-            let guard = room_map.lock().await;
+            let guard = room_map.read().await;
             guard
                 .values()
                 .map(|room| room.name.clone())
@@ -84,16 +101,16 @@ impl TcpCommandHandler {
         info!("Sending room list with {} rooms", room_names.len());
 
         TcpCommand::StringList(TcpCommandId::RoomList, room_names)
-            .write_to_tcp_stream(stream)
+            .write_to_stream(stream)
             .await
             .map_err(|e| format!("Failed to send room list: {}", e).into())
     }
 
     async fn handle_create_room(
         stream: &mut TcpStream,
-        room_map: Arc<Mutex<HashMap<RoomID, Room>>>,
+        room_map: Arc<RwLock<HashMap<RoomID, Room>>>,
         room_name: &str,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         if room_name.trim().is_empty() {
             info!("Client attempted to create room with empty name");
             return Self::send_error_response(stream, "Room name cannot be empty").await;
@@ -121,8 +138,7 @@ impl TcpCommandHandler {
         }
 
         let insert_result = {
-            let mut room_map_guard = room_map.lock().await;
-
+            let mut room_map_guard = room_map.write().await;
             if room_map_guard.values().any(|room| room.name == room_name) {
                 Err(format!("Room '{}' already exists", room_name))
             } else {
@@ -142,7 +158,7 @@ impl TcpCommandHandler {
                 );
 
                 TcpCommand::Simple(TcpCommandId::CreateRoomSuccess)
-                    .write_to_tcp_stream(stream)
+                    .write_to_stream(stream)
                     .await
                     .map_err(|e| {
                         format!("Failed to send create room success response: {}", e).into()
@@ -157,26 +173,33 @@ impl TcpCommandHandler {
 
     async fn handle_delete_room(
         stream: &mut TcpStream,
-        room_map: Arc<Mutex<HashMap<RoomID, Room>>>,
+        room_map: Arc<RwLock<HashMap<RoomID, Room>>>,
         room_name: &str,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         if room_name.trim().is_empty() {
             info!("Client attempted to delete room with empty name");
             return Self::send_error_response(stream, "Room name cannot be empty").await;
         }
 
         let room_id_result = {
-            let mut room_map_guard = room_map.lock().await;
+            let mut room_map_guard = room_map.write().await;
 
-            let room_id_to_delete = room_map_guard
+            let room_entry = room_map_guard
                 .iter()
                 .find(|(_, room)| room.name == room_name)
-                .map(|(id, _)| *id);
+                .map(|(id, room)| (*id, room.users.len()));
 
-            match room_id_to_delete {
-                Some(room_id) => {
-                    room_map_guard.remove(&room_id);
-                    Ok(room_id)
+            match room_entry {
+                Some((room_id, user_count)) => {
+                    if user_count > 0 {
+                        Err(format!(
+                            "Room '{}' cannot be deleted because it still has {} active user(s).",
+                            room_name, user_count
+                        ))
+                    } else {
+                        room_map_guard.remove(&room_id);
+                        Ok(room_id)
+                    }
                 }
                 None => Err(format!("Room '{}' does not exist", room_name)),
             }
@@ -190,14 +213,14 @@ impl TcpCommandHandler {
                 );
 
                 TcpCommand::Simple(TcpCommandId::DeleteRoomSuccess)
-                    .write_to_tcp_stream(stream)
+                    .write_to_stream(stream)
                     .await
                     .map_err(|e| {
                         format!("Failed to send delete room success response: {}", e).into()
                     })
             }
             Err(msg) => {
-                info!("Client tried to delete nonexistent room: '{}'", room_name);
+                info!("Client failed to delete room '{}': {}", room_name, msg);
                 Self::send_error_response(stream, &msg).await
             }
         }
@@ -205,49 +228,123 @@ impl TcpCommandHandler {
 
     async fn handle_join_room(
         stream: &mut TcpStream,
-        room_map: Arc<Mutex<HashMap<RoomID, Room>>>,
+        current_username: &str,
+        room_map: Arc<RwLock<HashMap<RoomID, Room>>>,
         room_name: &str,
-    ) -> Result<(), Box<dyn Error>> {
+        username_to_tcp_command_tx: Arc<Mutex<HashMap<String, broadcast::Sender<TcpCommand>>>>,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         if room_name.trim().is_empty() {
-            info!("Client attempted to join room with empty name");
+            log::info!("Client attempted to join room with empty name");
             return Self::send_error_response(stream, "Room name cannot be empty").await;
         }
 
-        let room_id_result = {
-            let room_map_guard = room_map.lock().await;
+        let mut sid = StreamID::default();
+        fill(&mut sid);
 
-            room_map_guard
-                .iter()
+        let (room_id_opt, other_users, other_sids) = {
+            let mut room_map_guard = room_map.write().await;
+
+            if let Some((room_id, room)) = room_map_guard
+                .iter_mut()
                 .find(|(_, room)| room.name == room_name)
-                .map(|(id, _)| *id)
-                .ok_or_else(|| format!("Room '{}' does not exist", room_name))
+            {
+                let mut sid_map = room.stream_id_to_socket_addr.lock().await;
+                let other_sids = sid_map.keys().cloned().collect::<Vec<_>>();
+
+                sid_map.insert(sid, None);
+
+                drop(sid_map);
+
+                let other_users = room.users.clone();
+                room.users.push(current_username.to_string());
+
+                (Some(*room_id), other_users, other_sids)
+            } else {
+                (None, vec![], vec![])
+            }
         };
 
-        match room_id_result {
-            Ok(rid) => {
-                let sid = [42];
-
+        match room_id_opt {
+            Some(rid) => {
                 let mut payload = Vec::from(rid);
-                payload.extend(sid);
+                payload.extend_from_slice(&sid);
 
                 TcpCommand::Bytes(TcpCommandId::JoinRoomSuccess, payload)
-                    .write_to_tcp_stream(stream)
-                    .await
-                    .map_err(|e| format!("Failed to send join room success response: {}", e).into())
+                    .write_to_stream(stream)
+                    .await?;
+
+                for user in other_users {
+                    let cmd = TcpCommand::Bytes(TcpCommandId::OtherUserJoinedRoom, sid.to_vec());
+
+                    if let Some(tx) = username_to_tcp_command_tx.lock().await.get(&user) {
+                        tx.send(cmd)?;
+                    }
+                }
+
+                for sid in other_sids {
+                    TcpCommand::Bytes(TcpCommandId::OtherUserJoinedRoom, sid.to_vec())
+                        .write_to_stream(stream)
+                        .await?;
+                }
             }
-            Err(msg) => {
-                info!("Client tried to join nonexistent room: '{}'", room_name);
-                Self::send_error_response(stream, &msg).await
+            None => {
+                log::info!("Client tried to join nonexistent room: '{}'", room_name);
+                Self::send_error_response(stream, &format!("Room '{}' does not exist", room_name))
+                    .await?;
             }
         }
+
+        Ok(())
+    }
+
+    async fn handle_leave_room(
+        current_username: &str,
+        room_map: Arc<RwLock<HashMap<RoomID, Room>>>,
+        username_to_tcp_command_tx: Arc<Mutex<HashMap<String, broadcast::Sender<TcpCommand>>>>,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let mut leaving_user_sid: Option<StreamID> = None;
+        let mut affected_users: Vec<String> = vec![];
+
+        {
+            let mut room_map_guard = room_map.write().await;
+
+            for room in room_map_guard.values_mut() {
+                if let Some(pos) = room.users.iter().position(|u| u == current_username) {
+                    room.users.remove(pos);
+                    affected_users = room.users.clone();
+
+                    let mut sid_map = room.stream_id_to_socket_addr.lock().await;
+
+                    if let Some((&sid, _)) = sid_map.iter().find(|(_, val)| val.is_none()) {
+                        leaving_user_sid = Some(sid);
+                        sid_map.remove(&sid);
+                    }
+
+                    break;
+                }
+            }
+        }
+
+        if let Some(sid) = leaving_user_sid {
+            let cmd = TcpCommand::Bytes(TcpCommandId::OtherUserLeftRoom, sid.to_vec());
+
+            let tx_map = username_to_tcp_command_tx.lock().await;
+            for user in affected_users {
+                if let Some(tx) = tx_map.get(&user) {
+                    let _ = tx.send(cmd.clone());
+                }
+            }
+        }
+
+        Ok(())
     }
 
     async fn send_error_response(
         stream: &mut TcpStream,
         error_message: &str,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         TcpCommand::String(TcpCommandId::ErrorResponse, error_message.to_string())
-            .write_to_tcp_stream(stream)
+            .write_to_stream(stream)
             .await
             .map_err(|e| format!("Failed to send error response: {}", e).into())
     }

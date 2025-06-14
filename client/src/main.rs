@@ -1,7 +1,9 @@
 mod call_interface;
 mod cli_display;
 mod client;
+mod frame;
 mod pre_call_interface;
+mod raw_mode_guard;
 
 use clap::Parser;
 use rand::{Rng, rng, seq::IndexedRandom};

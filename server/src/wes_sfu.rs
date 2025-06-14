@@ -2,40 +2,54 @@ use core::error::Error;
 use std::{collections::HashMap, sync::Arc};
 
 use log::{error, info};
+use shared::RoomID;
 use tokio::{
     net::{TcpListener, UdpSocket},
-    sync::Mutex,
+    sync::{Mutex, RwLock},
 };
 
-use crate::{tcp_handler::TcpHandler, udp_handler::UdpHandler};
+use crate::{room::Room, tcp_handler::TcpHandler, udp_handler::UdpHandler};
 
 pub struct WeSFU {
     tcp_listener: TcpListener,
     udp_socket: UdpSocket,
+    room_map_for_tcp: Arc<RwLock<HashMap<RoomID, Room>>>,
+    room_map_for_udp: Arc<RwLock<HashMap<RoomID, Room>>>,
 }
 
 impl WeSFU {
-    pub async fn bind(tcp_addr: String, udp_addr: String) -> Result<Self, Box<dyn Error>> {
+    pub async fn bind(
+        tcp_addr: String,
+        udp_addr: String,
+    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        let room_map_for_tcp = Arc::new(RwLock::new(HashMap::new()));
+        let room_map_for_udp = room_map_for_tcp.clone();
+
         Ok(Self {
             tcp_listener: TcpListener::bind(tcp_addr).await?,
             udp_socket: UdpSocket::bind(udp_addr).await?,
+            room_map_for_tcp,
+            room_map_for_udp,
         })
     }
 
     pub async fn listen(self) -> Result<(), Box<dyn Error + Send + Sync>> {
         let mut udp_task: tokio::task::JoinHandle<Result<(), Box<dyn Error + Send + Sync>>> =
             tokio::spawn(async move {
-                UdpHandler::handle_socket(self.udp_socket).await?;
+                UdpHandler::handle_socket(self.udp_socket, self.room_map_for_udp).await?;
 
                 return Ok(());
             });
 
-        let users = Arc::new(Mutex::new(Vec::new()));
-        let room_map = Arc::new(Mutex::new(HashMap::new()));
+        let users = Arc::new(RwLock::new(Vec::new()));
+
+        let username_to_tcp_command_tx = Arc::new(Mutex::new(HashMap::new()));
 
         loop {
+            let username_to_tcp_command_tx = username_to_tcp_command_tx.clone();
+
             let users = users.clone();
-            let room_map = room_map.clone();
+            let room_map = self.room_map_for_tcp.clone();
 
             tokio::select! {
 
@@ -54,14 +68,15 @@ impl WeSFU {
 
                         let mut current_username_option = None;
 
-                        if let Err(e) = TcpHandler::handle_stream(tcp_socket, &mut current_username_option, users.clone(), room_map).await {
+                        if let Err(e) = TcpHandler::handle_stream(tcp_socket, &mut current_username_option, users.clone(), room_map.clone(), username_to_tcp_command_tx).await {
 
                             error!("Error handling TcpSocket: {}", e);
                         }
 
                         if let Some(current_username) = current_username_option.take() {
 
-                            users.lock().await.retain(|user| user != &current_username);
+                            users.write().await.retain(|user| user != &current_username);
+
                             info!("{} has disconnected", current_username);
                         }
                     });

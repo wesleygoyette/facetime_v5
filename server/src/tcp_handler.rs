@@ -6,49 +6,77 @@ use shared::{
     MAX_NAME_LENGTH, RoomID, is_valid_name, received_tcp_command::ReceivedTcpCommand,
     tcp_command::TcpCommand, tcp_command_id::TcpCommandId,
 };
-use tokio::{net::TcpStream, sync::Mutex};
+use tokio::{
+    net::TcpStream,
+    sync::{Mutex, RwLock, broadcast},
+};
 
 use crate::{room::Room, tcp_command_handler::TcpCommandHandler};
 
-pub struct TcpHandler {}
+pub struct TcpHandler;
 
 impl TcpHandler {
     pub async fn handle_stream(
         mut stream: TcpStream,
         current_username_option: &mut Option<String>,
-        users: Arc<Mutex<Vec<String>>>,
-        room_map: Arc<Mutex<HashMap<RoomID, Room>>>,
-    ) -> Result<(), Box<dyn Error>> {
+        users: Arc<RwLock<Vec<String>>>,
+        room_map: Arc<RwLock<HashMap<RoomID, Room>>>,
+        username_to_tcp_command_tx: Arc<Mutex<HashMap<String, broadcast::Sender<TcpCommand>>>>,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let current_username = match Self::handle_handshake(&mut stream, users.clone()).await? {
             Some(username) => username,
             None => return Ok(()),
         };
 
+        let current_username = current_username.clone();
+
         *current_username_option = Some(current_username.clone());
-        users.lock().await.push(current_username.clone());
+        users.write().await.push(current_username.clone());
         info!("{} has connected!", current_username);
 
-        loop {
-            let incoming_command = match TcpCommand::read_from_tcp_stream(&mut stream).await? {
-                ReceivedTcpCommand::EOF => return Ok(()),
-                ReceivedTcpCommand::Command(command) => command,
-            };
+        let (tcp_command_channel_tx, mut tcp_command_channel_rx) = broadcast::channel(16);
 
-            TcpCommandHandler::handle_command(
-                &incoming_command,
-                &mut stream,
-                users.clone(),
-                room_map.clone(),
-            )
-            .await?;
+        username_to_tcp_command_tx
+            .lock()
+            .await
+            .insert(current_username.clone(), tcp_command_channel_tx);
+
+        loop {
+            tokio::select! {
+
+                result = TcpCommand::read_from_stream(&mut stream) => {
+
+                    let incoming_command = match result? {
+                        ReceivedTcpCommand::EOF => return Ok(()),
+                        ReceivedTcpCommand::Command(command) => command,
+                    };
+
+                    TcpCommandHandler::handle_command(
+                        &incoming_command,
+                        &mut stream,
+                        &current_username,
+                        users.clone(),
+                        room_map.clone(),
+                        username_to_tcp_command_tx.clone(),
+                    )
+                    .await?;
+                }
+
+                result = tcp_command_channel_rx.recv() => {
+                    let outgoing_command = result?;
+
+                    outgoing_command.write_to_stream(&mut stream).await?;
+
+                }
+            }
         }
     }
 
     async fn handle_handshake(
         stream: &mut TcpStream,
-        users: Arc<Mutex<Vec<String>>>,
-    ) -> Result<Option<String>, Box<dyn Error>> {
-        let received_command = match TcpCommand::read_from_tcp_stream(stream).await? {
+        users: Arc<RwLock<Vec<String>>>,
+    ) -> Result<Option<String>, Box<dyn Error + Send + Sync>> {
+        let received_command = match TcpCommand::read_from_stream(stream).await? {
             ReceivedTcpCommand::EOF => return Ok(None),
             ReceivedTcpCommand::Command(cmd) => cmd,
         };
@@ -64,7 +92,7 @@ impl TcpHandler {
                 MAX_NAME_LENGTH
             );
             TcpCommand::String(TcpCommandId::ErrorResponse, error_message)
-                .write_to_tcp_stream(stream)
+                .write_to_stream(stream)
                 .await?;
 
             info!("Client sent invalid username");
@@ -76,7 +104,7 @@ impl TcpHandler {
             let error_message =
                 "Username must contain only letters, numbers, underscores (_), or hyphens (-).";
             TcpCommand::String(TcpCommandId::ErrorResponse, error_message.to_string())
-                .write_to_tcp_stream(stream)
+                .write_to_stream(stream)
                 .await?;
 
             info!("Client sent invalid username");
@@ -84,10 +112,10 @@ impl TcpHandler {
             return Ok(None);
         }
 
-        if users.lock().await.contains(&received_username) {
+        if users.read().await.contains(&received_username) {
             let error_message = "Username is already taken.";
             TcpCommand::String(TcpCommandId::ErrorResponse, error_message.to_string())
-                .write_to_tcp_stream(stream)
+                .write_to_stream(stream)
                 .await?;
 
             info!("Client sent invalid username");
@@ -96,7 +124,7 @@ impl TcpHandler {
         }
 
         TcpCommand::Simple(TcpCommandId::HelloFromServer)
-            .write_to_tcp_stream(stream)
+            .write_to_stream(stream)
             .await?;
 
         return Ok(Some(received_username));

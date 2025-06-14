@@ -9,12 +9,12 @@ use tokio::net::TcpStream;
 
 use crate::cli_display::{CliDisplay, PROMPT_STR};
 
-pub struct PreCallInterface {}
+pub struct PreCallInterface;
 
 impl PreCallInterface {
     pub async fn run(
         tcp_stream: &mut TcpStream,
-    ) -> Result<Option<(String, Vec<u8>)>, Box<dyn Error>> {
+    ) -> Result<Option<(String, Vec<u8>)>, Box<dyn Error + Send + Sync>> {
         let stdin = io::stdin();
         let mut reader = stdin.lock();
 
@@ -46,7 +46,7 @@ impl PreCallInterface {
     async fn handle_user_input(
         input: &str,
         tcp_stream: &mut TcpStream,
-    ) -> Result<Option<(String, Vec<u8>)>, Box<dyn Error>> {
+    ) -> Result<Option<(String, Vec<u8>)>, Box<dyn Error + Send + Sync>> {
         match input {
             "" => {}
 
@@ -109,12 +109,12 @@ impl PreCallInterface {
     }
 }
 
-async fn list_users(tcp_stream: &mut TcpStream) -> Result<(), Box<dyn Error>> {
+async fn list_users(tcp_stream: &mut TcpStream) -> Result<(), Box<dyn Error + Send + Sync>> {
     TcpCommand::Simple(TcpCommandId::GetUserList)
-        .write_to_tcp_stream(tcp_stream)
+        .write_to_stream(tcp_stream)
         .await?;
 
-    let received_command_option = TcpCommand::read_from_tcp_stream(tcp_stream).await?;
+    let received_command_option = TcpCommand::read_from_stream(tcp_stream).await?;
 
     let received_command = match received_command_option {
         ReceivedTcpCommand::EOF => {
@@ -133,12 +133,12 @@ async fn list_users(tcp_stream: &mut TcpStream) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn list_rooms(tcp_stream: &mut TcpStream) -> Result<(), Box<dyn Error>> {
+async fn list_rooms(tcp_stream: &mut TcpStream) -> Result<(), Box<dyn Error + Send + Sync>> {
     TcpCommand::Simple(TcpCommandId::GetRoomList)
-        .write_to_tcp_stream(tcp_stream)
+        .write_to_stream(tcp_stream)
         .await?;
 
-    let received_command_option = TcpCommand::read_from_tcp_stream(tcp_stream).await?;
+    let received_command_option = TcpCommand::read_from_stream(tcp_stream).await?;
 
     let received_command = match received_command_option {
         ReceivedTcpCommand::EOF => {
@@ -157,12 +157,15 @@ async fn list_rooms(tcp_stream: &mut TcpStream) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn create_room(tcp_stream: &mut TcpStream, room_name: &str) -> Result<(), Box<dyn Error>> {
+async fn create_room(
+    tcp_stream: &mut TcpStream,
+    room_name: &str,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     TcpCommand::String(TcpCommandId::CreateRoom, room_name.to_string())
-        .write_to_tcp_stream(tcp_stream)
+        .write_to_stream(tcp_stream)
         .await?;
 
-    let received_command_option = TcpCommand::read_from_tcp_stream(tcp_stream).await?;
+    let received_command_option = TcpCommand::read_from_stream(tcp_stream).await?;
 
     let received_command = match received_command_option {
         ReceivedTcpCommand::EOF => {
@@ -184,12 +187,15 @@ async fn create_room(tcp_stream: &mut TcpStream, room_name: &str) -> Result<(), 
     }
 }
 
-async fn delete_room(tcp_stream: &mut TcpStream, room_name: &str) -> Result<(), Box<dyn Error>> {
+async fn delete_room(
+    tcp_stream: &mut TcpStream,
+    room_name: &str,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     TcpCommand::String(TcpCommandId::DeleteRoom, room_name.to_string())
-        .write_to_tcp_stream(tcp_stream)
+        .write_to_stream(tcp_stream)
         .await?;
 
-    let received_command_option = TcpCommand::read_from_tcp_stream(tcp_stream).await?;
+    let received_command_option = TcpCommand::read_from_stream(tcp_stream).await?;
 
     let received_command = match received_command_option {
         ReceivedTcpCommand::EOF => {
@@ -214,12 +220,12 @@ async fn delete_room(tcp_stream: &mut TcpStream, room_name: &str) -> Result<(), 
 async fn join_room(
     tcp_stream: &mut TcpStream,
     room_name: &str,
-) -> Result<Option<(String, Vec<u8>)>, Box<dyn Error>> {
+) -> Result<Option<(String, Vec<u8>)>, Box<dyn Error + Send + Sync>> {
     TcpCommand::String(TcpCommandId::JoinRoom, room_name.to_string())
-        .write_to_tcp_stream(tcp_stream)
+        .write_to_stream(tcp_stream)
         .await?;
 
-    let received_command_option = TcpCommand::read_from_tcp_stream(tcp_stream).await?;
+    let received_command_option = TcpCommand::read_from_stream(tcp_stream).await?;
 
     let received_command = match received_command_option {
         ReceivedTcpCommand::EOF => {

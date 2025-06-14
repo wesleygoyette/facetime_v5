@@ -1,4 +1,5 @@
 use crate::tcp_command_payload_type::TcpCommandPayloadType;
+use core::error::Error;
 
 const COMMAND_BYTE_OFFSET: u8 = 69;
 
@@ -22,7 +23,7 @@ macro_rules! tcp_command_id_enum {
                 *self as u8 + COMMAND_BYTE_OFFSET
             }
 
-            pub fn from_byte(byte: u8) -> Result<Self, Box<dyn std::error::Error>> {
+            pub fn from_byte(byte: u8) -> Result<Self, Box<dyn Error + Send + Sync>> {
                 match byte.wrapping_sub(COMMAND_BYTE_OFFSET) {
                     $(x if x == $name::$variant as u8 => Ok($name::$variant),)*
                     _ => Err("Invalid TcpCommandId".into()),
@@ -47,6 +48,9 @@ tcp_command_id_enum! {
         DeleteRoomSuccess,
         JoinRoom,
         JoinRoomSuccess,
+        LeaveRoom,
+        OtherUserJoinedRoom,
+        OtherUserLeftRoom
     }
 }
 
@@ -59,16 +63,19 @@ impl TcpCommandId {
             TcpCommandId::CreateRoomSuccess => TcpCommandPayloadType::Simple,
             TcpCommandId::CreateRoom => TcpCommandPayloadType::String,
             TcpCommandId::DeleteRoomSuccess => TcpCommandPayloadType::Simple,
-            TcpCommandId::JoinRoom => TcpCommandPayloadType::String,
+            TcpCommandId::LeaveRoom => TcpCommandPayloadType::Simple,
 
             TcpCommandId::HelloFromClient => TcpCommandPayloadType::String,
             TcpCommandId::ErrorResponse => TcpCommandPayloadType::String,
             TcpCommandId::DeleteRoom => TcpCommandPayloadType::String,
+            TcpCommandId::JoinRoom => TcpCommandPayloadType::String,
 
             TcpCommandId::UserList => TcpCommandPayloadType::StringList,
             TcpCommandId::RoomList => TcpCommandPayloadType::StringList,
 
             TcpCommandId::JoinRoomSuccess => TcpCommandPayloadType::Bytes,
+            TcpCommandId::OtherUserJoinedRoom => TcpCommandPayloadType::Bytes,
+            TcpCommandId::OtherUserLeftRoom => TcpCommandPayloadType::Bytes,
         }
     }
 }
