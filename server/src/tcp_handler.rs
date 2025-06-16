@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use log::info;
 use shared::{
-    MAX_NAME_LENGTH, RoomID, is_valid_name, received_tcp_command::ReceivedTcpCommand,
+    MAX_NAME_LENGTH, RoomID, StreamID, is_valid_name, received_tcp_command::ReceivedTcpCommand,
     tcp_command::TcpCommand, tcp_command_id::TcpCommandId,
 };
 use tokio::{
@@ -19,6 +19,7 @@ impl TcpHandler {
     pub async fn handle_stream(
         mut stream: TcpStream,
         current_username_option: &mut Option<String>,
+        current_sid_option: &mut Option<StreamID>,
         users: Arc<RwLock<Vec<String>>>,
         room_map: Arc<RwLock<HashMap<RoomID, Room>>>,
         username_to_tcp_command_tx: Arc<Mutex<HashMap<String, broadcast::Sender<TcpCommand>>>>,
@@ -55,6 +56,7 @@ impl TcpHandler {
                         &incoming_command,
                         &mut stream,
                         &current_username,
+                        current_sid_option,
                         users.clone(),
                         room_map.clone(),
                         username_to_tcp_command_tx.clone(),

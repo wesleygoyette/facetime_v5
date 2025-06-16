@@ -33,14 +33,7 @@ impl Client {
                     let udp_stream = UdpSocket::bind("0.0.0.0:0").await?;
                     udp_stream.connect(&server_udp_addr).await?;
 
-                    if let Err(e) = CallInterface::run(
-                        username,
-                        &room_name,
-                        &full_sid,
-                        &mut tcp_stream,
-                        udp_stream,
-                    )
-                    .await
+                    if let Err(e) = CallInterface::run(&full_sid, &mut tcp_stream, udp_stream).await
                     {
                         eprintln!("Call Error: {}", e);
                     }

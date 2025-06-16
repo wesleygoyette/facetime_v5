@@ -1,7 +1,6 @@
 use core::error::Error;
 use std::{collections::HashMap, sync::Arc};
 
-use log::info;
 use shared::{RoomID, StreamID};
 use tokio::{net::UdpSocket, sync::RwLock, task::JoinSet};
 
@@ -25,8 +24,6 @@ impl UdpHandler {
         let min_packet_size = rid_len + sid_len + 1;
 
         let mut to_addrs = Vec::with_capacity(64);
-
-        let info_logging_enabled = log::log_enabled!(log::Level::Info);
 
         loop {
             let (n, from_addr) = socket.recv_from(&mut buf).await?;
@@ -80,15 +77,6 @@ impl UdpHandler {
             payload.clear();
             payload.extend_from_slice(unsafe { buf.get_unchecked(rid_len..rid_len + sid_len) });
             payload.extend_from_slice(frame);
-
-            if info_logging_enabled {
-                info!(
-                    "Received {} bytes from {}, forwarding to {} destinations",
-                    n,
-                    from_addr,
-                    to_addrs.len()
-                );
-            }
 
             if to_addrs.len() <= 4 {
                 for &to_addr in &to_addrs {

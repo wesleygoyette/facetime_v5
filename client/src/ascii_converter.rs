@@ -2,6 +2,7 @@ use core::error::Error;
 use crossterm::{
     ExecutableCommand, QueueableCommand,
     cursor::MoveTo,
+    style::Print,
     terminal::{Clear, ClearType},
 };
 use opencv::{
@@ -15,8 +16,8 @@ const ASCII_CHARS: &[char] = &[
     ' ', '.', '^', '=', '~', '-', ',', ':', ';', '+', '*', '?', '%', 'S', '#', '@',
 ];
 
-pub const WIDTH: i32 = 1920 / 3;
-pub const HEIGHT: i32 = 1080 / 3;
+pub const WIDTH: i32 = 92; //1920 / 3;
+pub const HEIGHT: i32 = 28; //1080 / 3;
 
 pub type Frame = Vec<u8>;
 
@@ -136,16 +137,49 @@ impl AsciiConverter {
             self.last_frame = None;
         }
 
+        if size_changed || self.last_frame.is_none() {
+            let lines: Vec<&str> = new_content.lines().collect();
+            stdout().queue(MoveTo(0, 0))?;
+
+            for (line_num, line) in lines.iter().enumerate() {
+                stdout()
+                    .queue(MoveTo(0, line_num as u16))?
+                    .queue(Print(line))?;
+            }
+
+            let last_line_num = lines.len().saturating_sub(1) as u16;
+            let last_line_len = lines.last().map(|l| l.len()).unwrap_or(0) as u16;
+            stdout()
+                .queue(MoveTo(last_line_len, last_line_num))?
+                .flush()?;
+
+            self.last_frame = Some(new_content.to_string());
+            return Ok(());
+        }
+
         if let Some(ref last) = self.last_frame {
             if self.try_differential_update(last, new_content)? {
                 self.last_frame = Some(new_content.to_string());
+
+                let lines: Vec<&str> = new_content.lines().collect();
+                let last_line_num = lines.len().saturating_sub(1) as u16;
+                let last_line_len = lines.last().map(|l| l.len()).unwrap_or(0) as u16;
+                stdout()
+                    .queue(MoveTo(last_line_len, last_line_num))?
+                    .flush()?;
+
                 return Ok(());
             }
         }
 
-        stdout()
-            .queue(MoveTo(0, 0))?
-            .queue(crossterm::style::Print(new_content))?;
+        let lines: Vec<&str> = new_content.lines().collect();
+        stdout().queue(MoveTo(0, 0))?;
+
+        for (line_num, line) in lines.iter().enumerate() {
+            stdout()
+                .queue(MoveTo(0, line_num as u16))?
+                .queue(Print(line))?;
+        }
 
         if let Some(ref last) = self.last_frame {
             let new_lines = new_content.lines().count();
@@ -160,7 +194,13 @@ impl AsciiConverter {
             }
         }
 
-        stdout().flush()?;
+        let lines: Vec<&str> = new_content.lines().collect();
+        let last_line_num = lines.len().saturating_sub(1) as u16;
+        let last_line_len = lines.last().map(|l| l.len()).unwrap_or(0) as u16;
+        stdout()
+            .queue(MoveTo(last_line_len, last_line_num))?
+            .flush()?;
+
         self.last_frame = Some(new_content.to_string());
         Ok(())
     }
@@ -180,17 +220,61 @@ impl AsciiConverter {
         let mut updated = false;
         let max_lines = old_lines.len().max(new_lines.len());
 
-        for (line_num, (old_line, new_line)) in old_lines
-            .iter()
-            .zip(new_lines.iter())
-            .enumerate()
-            .take(max_lines)
-        {
-            if old_line != new_line {
+        for line_num in 0..max_lines {
+            let old_line = old_lines.get(line_num).unwrap_or(&"");
+            let new_line = new_lines.get(line_num).unwrap_or(&"");
+
+            if old_line == new_line {
+                continue;
+            }
+
+            let old_chars: Vec<char> = old_line.chars().collect();
+            let new_chars: Vec<char> = new_line.chars().collect();
+            let max_chars = old_chars.len().max(new_chars.len());
+
+            let mut col = 0;
+            while col < max_chars {
+                let old_char = old_chars.get(col).copied().unwrap_or(' ');
+                let new_char = new_chars.get(col).copied().unwrap_or(' ');
+
+                if old_char != new_char {
+                    let start_col = col;
+                    let mut end_col = col;
+
+                    while end_col < max_chars {
+                        let old_c = old_chars.get(end_col).copied().unwrap_or(' ');
+                        let new_c = new_chars.get(end_col).copied().unwrap_or(' ');
+
+                        if old_c == new_c {
+                            break;
+                        }
+                        end_col += 1;
+                    }
+
+                    stdout().queue(MoveTo(start_col as u16, line_num as u16))?;
+
+                    if end_col <= new_chars.len() {
+                        let changed_str: String = new_chars[start_col..end_col].iter().collect();
+                        stdout().queue(Print(changed_str))?;
+                    } else {
+                        if start_col < new_chars.len() {
+                            let changed_str: String = new_chars[start_col..].iter().collect();
+                            stdout().queue(Print(changed_str))?;
+                        }
+                        stdout().queue(Clear(ClearType::UntilNewLine))?;
+                    }
+
+                    updated = true;
+                    col = end_col;
+                } else {
+                    col += 1;
+                }
+            }
+
+            if new_chars.len() < old_chars.len() {
                 stdout()
-                    .queue(MoveTo(0, line_num as u16))?
-                    .queue(Clear(ClearType::CurrentLine))?
-                    .queue(crossterm::style::Print(new_line))?;
+                    .queue(MoveTo(new_chars.len() as u16, line_num as u16))?
+                    .queue(Clear(ClearType::UntilNewLine))?;
                 updated = true;
             }
         }
@@ -205,7 +289,12 @@ impl AsciiConverter {
         }
 
         if updated {
-            stdout().flush()?;
+            let lines: Vec<&str> = new_content.lines().collect();
+            let last_line_num = lines.len().saturating_sub(1) as u16;
+            let last_line_len = lines.last().map(|l| l.len()).unwrap_or(0) as u16;
+            stdout()
+                .queue(MoveTo(last_line_len, last_line_num))?
+                .flush()?;
         }
 
         Ok(true)

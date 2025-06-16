@@ -21,6 +21,7 @@ impl TcpCommandHandler {
         incoming_command: &TcpCommand,
         stream: &mut TcpStream,
         current_username: &str,
+        current_sid_option: &mut Option<StreamID>,
         users: Arc<RwLock<Vec<String>>>,
         room_map: Arc<RwLock<HashMap<RoomID, Room>>>,
         username_to_tcp_command_tx: Arc<Mutex<HashMap<String, broadcast::Sender<TcpCommand>>>>,
@@ -42,6 +43,7 @@ impl TcpCommandHandler {
                 Self::handle_join_room(
                     stream,
                     current_username,
+                    current_sid_option,
                     room_map,
                     room_name,
                     username_to_tcp_command_tx,
@@ -49,8 +51,13 @@ impl TcpCommandHandler {
                 .await
             }
             TcpCommand::Simple(TcpCommandId::LeaveRoom) => {
-                Self::handle_leave_room(current_username, room_map, username_to_tcp_command_tx)
-                    .await
+                Self::handle_leave_room(
+                    current_username,
+                    current_sid_option,
+                    room_map,
+                    username_to_tcp_command_tx,
+                )
+                .await
             }
             _ => {
                 warn!("Unhandled command received: {:?}", incoming_command);
@@ -229,6 +236,7 @@ impl TcpCommandHandler {
     async fn handle_join_room(
         stream: &mut TcpStream,
         current_username: &str,
+        current_sid_option: &mut Option<StreamID>,
         room_map: Arc<RwLock<HashMap<RoomID, Room>>>,
         room_name: &str,
         username_to_tcp_command_tx: Arc<Mutex<HashMap<String, broadcast::Sender<TcpCommand>>>>,
@@ -257,6 +265,8 @@ impl TcpCommandHandler {
 
                 let other_users = room.users.clone();
                 room.users.push(current_username.to_string());
+
+                *current_sid_option = Some(sid);
 
                 (Some(*room_id), other_users, other_sids)
             } else {
@@ -299,36 +309,44 @@ impl TcpCommandHandler {
 
     async fn handle_leave_room(
         current_username: &str,
+        current_sid_option: &mut Option<StreamID>,
         room_map: Arc<RwLock<HashMap<RoomID, Room>>>,
         username_to_tcp_command_tx: Arc<Mutex<HashMap<String, broadcast::Sender<TcpCommand>>>>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let mut leaving_user_sid: Option<StreamID> = None;
+        let mut leaving_sid: Option<StreamID> = None;
         let mut affected_users: Vec<String> = vec![];
 
-        {
-            let mut room_map_guard = room_map.write().await;
+        let current_sid = match current_sid_option {
+            Some(sid) => *sid,
+            None => return Err("No sid found".into()),
+        };
 
-            for room in room_map_guard.values_mut() {
-                if let Some(pos) = room.users.iter().position(|u| u == current_username) {
-                    room.users.remove(pos);
+        {
+            let mut map_guard = room_map.write().await;
+
+            for room in map_guard.values_mut() {
+                if let Some(_) = room
+                    .stream_id_to_socket_addr
+                    .lock()
+                    .await
+                    .remove(&current_sid)
+                {
+                    leaving_sid = Some(current_sid);
+
+                    room.users.retain(|user| user != &current_username);
                     affected_users = room.users.clone();
 
-                    let mut sid_map = room.stream_id_to_socket_addr.lock().await;
-
-                    if let Some((&sid, _)) = sid_map.iter().find(|(_, val)| val.is_none()) {
-                        leaving_user_sid = Some(sid);
-                        sid_map.remove(&sid);
-                    }
+                    *current_sid_option = None;
 
                     break;
                 }
             }
         }
 
-        if let Some(sid) = leaving_user_sid {
+        if let Some(sid) = leaving_sid {
+            let tx_map = username_to_tcp_command_tx.lock().await;
             let cmd = TcpCommand::Bytes(TcpCommandId::OtherUserLeftRoom, sid.to_vec());
 
-            let tx_map = username_to_tcp_command_tx.lock().await;
             for user in affected_users {
                 if let Some(tx) = tx_map.get(&user) {
                     let _ = tx.send(cmd.clone());

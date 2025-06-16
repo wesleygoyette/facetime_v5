@@ -2,7 +2,7 @@ use core::error::Error;
 use std::{collections::HashMap, sync::Arc};
 
 use log::{error, info};
-use shared::RoomID;
+use shared::{RoomID, tcp_command::TcpCommand, tcp_command_id::TcpCommandId};
 use tokio::{
     net::{TcpListener, UdpSocket},
     sync::{Mutex, RwLock},
@@ -67,8 +67,9 @@ impl WeSFU {
                         let users = users.clone();
 
                         let mut current_username_option = None;
+                        let mut current_sid_option = None;
 
-                        if let Err(e) = TcpHandler::handle_stream(tcp_socket, &mut current_username_option, users.clone(), room_map.clone(), username_to_tcp_command_tx.clone()).await {
+                        if let Err(e) = TcpHandler::handle_stream(tcp_socket, &mut current_username_option, &mut current_sid_option, users.clone(), room_map.clone(), username_to_tcp_command_tx.clone()).await {
 
                             error!("Error handling TcpSocket: {}", e);
                         }
@@ -81,8 +82,31 @@ impl WeSFU {
                             .await
                             .remove(&current_username);
 
+                            if let Some(sid) = current_sid_option {
+
+                                for room in room_map.write().await.values_mut() {
+
+                                    let mut stream_id_to_socket_addr_guard = room.stream_id_to_socket_addr.lock().await;
+                                    if stream_id_to_socket_addr_guard.contains_key(&sid) {
+
+                                        stream_id_to_socket_addr_guard.remove(&sid);
+
+                                        room.users.retain(|user| user != &current_username);
+
+                                        for user in room.users.clone() {
+
+                                            if let Some(tx) = username_to_tcp_command_tx.lock().await.get(&user) {
+
+                                                let _ = tx.send(TcpCommand::Bytes(TcpCommandId::OtherUserLeftRoom, sid.to_vec()));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
                             info!("{} has disconnected", current_username);
                         }
+
                     });
                 }
             }
