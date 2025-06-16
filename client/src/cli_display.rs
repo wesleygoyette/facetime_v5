@@ -1,9 +1,3 @@
-use crossterm::{
-    cursor, execute,
-    terminal::{Clear, ClearType},
-};
-use std::io::{Write, stdout};
-
 pub const PROMPT_STR: &str = "> ";
 
 pub struct CliDisplay;

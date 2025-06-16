@@ -1,7 +1,7 @@
 use core::error::Error;
 use crossterm::{
     ExecutableCommand, QueueableCommand,
-    cursor::{MoveTo, MoveToColumn},
+    cursor::MoveTo,
     terminal::{Clear, ClearType},
 };
 use opencv::{
