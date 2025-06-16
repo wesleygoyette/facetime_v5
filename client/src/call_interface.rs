@@ -1,24 +1,22 @@
-use crate::{frame::Frame, raw_mode_guard::RawModeGuard};
+use crate::ascii_converter::Frame;
+use crate::{ascii_converter::AsciiConverter, camera::Camera, raw_mode_guard::RawModeGuard};
 use core::error::Error;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use crossterm::{
-    cursor::{MoveToColumn, MoveToNextLine},
-    execute,
-    terminal::{Clear, ClearType},
-};
-use shared::{
-    StreamID, received_tcp_command::ReceivedTcpCommand, tcp_command::TcpCommand,
-    tcp_command_id::TcpCommandId,
-};
+use crossterm::cursor::MoveTo;
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::execute;
+use crossterm::terminal::{self, Clear, ClearType};
+use shared::StreamID;
+use shared::received_tcp_command::ReceivedTcpCommand;
+use shared::tcp_command::TcpCommand;
+use shared::tcp_command_id::TcpCommandId;
 use std::collections::HashMap;
-use std::hash::Hash;
 use std::io::{Write, stdout};
 use std::sync::Arc;
-use tokio::sync::Mutex;
-use tokio::{
-    net::{TcpStream, UdpSocket},
-    sync::{broadcast, watch},
-};
+use std::time::Duration;
+use tokio::net::{TcpStream, UdpSocket};
+use tokio::sync::{Mutex, watch};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 pub struct CallInterface;
 
@@ -30,133 +28,136 @@ impl CallInterface {
         tcp_stream: &mut TcpStream,
         udp_stream: UdpSocket,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        println!(
-            "Connecting to {} as {} using sid: {:?}...",
-            room_name, username, full_sid
-        );
+        let mut camera = Camera::new()?;
+        let ascii_converter = Arc::new(Mutex::new(AsciiConverter::new()));
 
-        let _raw_mode_guard = RawModeGuard::new()?;
+        let cancel_token = CancellationToken::new();
+        let camera_loop_cancel_token = cancel_token.clone();
+        let user_input_loop_cancel_token = cancel_token.clone();
+        let tcp_loop_cancel_token = cancel_token.clone();
+        let render_loop_cancel_token = cancel_token.clone();
 
-        let sid_to_frame_map_for_tcp = Arc::new(Mutex::new(HashMap::new()));
-        let sid_to_frame_map_for_udp = Arc::new(Mutex::new(HashMap::new()));
+        let (camera_frame_channel_tx, camera_frame_channel_rx) =
+            watch::channel(AsciiConverter::frame_to_nibbles(camera.get_frame().await?)?);
 
-        let (end_call_tx, end_call_rx) = broadcast::channel::<()>(1);
-        let end_call_tx_for_user_input_task = end_call_tx.clone();
-        let end_call_tx_for_draw_frames_task = end_call_tx.clone();
-        let end_call_rx_for_draw_frames_task = end_call_tx.subscribe();
-        let end_call_tx_for_udp_task = end_call_tx.clone();
-        let end_call_rx_for_udp_task = end_call_tx.subscribe();
-        let end_call_tx_for_camera_task = end_call_tx.clone();
+        let raw_mode_guard = RawModeGuard::new()?;
 
-        let (draw_to_screen_tx, draw_to_screen_rx) = watch::channel(Vec::<Frame>::new());
+        let mut render_loop_task = tokio::spawn(render_loop(
+            ascii_converter.clone(),
+            camera_frame_channel_rx,
+            render_loop_cancel_token,
+        ));
 
-        let user_input_handler_task = tokio::spawn(async move {
-            if let Err(e) = wait_for_ctrl_c_press().await {
-                eprintln!("Error handling user input: {}", e);
-            }
+        let mut camera_loop_task = tokio::spawn(camera_loop(
+            camera,
+            camera_frame_channel_tx,
+            camera_loop_cancel_token,
+        ));
 
-            if let Err(e) = end_call_tx_for_user_input_task.send(()) {
-                eprintln!("Error sending to end_call_tx: {}", e);
-            };
-        });
+        let mut user_input_loop_task: JoinHandle<Result<(), Box<dyn Error + Send + Sync>>> =
+            tokio::spawn(user_input_loop(user_input_loop_cancel_token));
 
-        let draw_frames_loop_task = tokio::spawn(async move {
-            if let Err(e) =
-                draw_frames_loop(draw_to_screen_rx, end_call_rx_for_draw_frames_task).await
-            {
-                eprintln!("Error drawing frame: {}", e);
-            }
+        let sid_to_frame_map = Arc::new(Mutex::new(HashMap::new()));
 
-            let _ = end_call_tx_for_draw_frames_task.send(());
-        });
-        let udp_handler_task = tokio::spawn(async move {
-            if let Err(e) = udp_handler_loop(
-                udp_stream,
-                sid_to_frame_map_for_tcp,
-                end_call_rx_for_udp_task,
-            )
-            .await
-            {
-                eprintln!("Error handling udp: {}", e);
-            }
+        let result = tokio::select! {
+            result = &mut user_input_loop_task => result?,
+            result = &mut camera_loop_task => result?,
+            result = &mut render_loop_task => result?,
+            result = tcp_loop(tcp_stream, sid_to_frame_map, tcp_loop_cancel_token) => result
+        };
 
-            let _ = end_call_tx_for_udp_task.send(());
-        });
-        let camera_task = tokio::spawn(async move {});
+        cancel_token.cancel();
 
-        tcp_handler_loop(tcp_stream, sid_to_frame_map_for_udp, end_call_rx).await?;
-        let _ = end_call_tx.send(());
+        if !user_input_loop_task.is_finished() {
+            let _ = tokio::time::timeout(Duration::from_millis(800), user_input_loop_task).await;
+        }
+        if !camera_loop_task.is_finished() {
+            let _ = tokio::time::timeout(Duration::from_millis(800), camera_loop_task).await;
+        }
+        if !render_loop_task.is_finished() {
+            let _ = tokio::time::timeout(Duration::from_millis(800), render_loop_task).await;
+        }
 
-        user_input_handler_task.await?;
-        udp_handler_task.await?;
-        draw_frames_loop_task.await?;
-        camera_task.await?;
+        drop(raw_mode_guard);
 
-        Ok(())
+        let mut stdout = stdout();
+        let _ = execute!(stdout, Clear(ClearType::All), MoveTo(0, 0));
+        let _ = stdout.flush();
+
+        result
     }
 }
 
-async fn udp_handler_loop(
-    udp_stream: UdpSocket,
-    sid_to_frame_map: Arc<Mutex<HashMap<StreamID, Option<Frame>>>>,
-    mut end_call_rx: broadcast::Receiver<()>,
+async fn camera_loop(
+    mut camera: Camera,
+    camera_frame_channel_tx: watch::Sender<Frame>,
+    camera_loop_cancel_token: CancellationToken,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let mut buf = [0; 1500];
-
     loop {
         tokio::select! {
-
-            _ = end_call_rx.recv() => {
-
+            _ = camera_loop_cancel_token.cancelled() => {
                 break;
             }
 
-            result = udp_stream.recv(&mut buf) => {
+            result = async {
+                let frame_mat = camera.get_frame().await?;
 
-                let n  = result?;
+                if !camera_loop_cancel_token.is_cancelled() {
 
-                let sid_len = StreamID::default().len();
-
-                if n < sid_len + 1 {
-
-                    continue;
+                    let frame = AsciiConverter::frame_to_nibbles(frame_mat)?;
+                    camera_frame_channel_tx.send(frame)?;
                 }
 
-                let sid = StreamID::try_from(&buf[0..sid_len])?;
-
-                let payload = &buf[sid_len..n];
-
-                dbg!(sid);
-                dbg!(payload);
-
-                break;
+                Ok::<(), Box<dyn Error + Send + Sync>>(())
+            } => {
+                if let Err(e) = result {
+                    eprintln!("Camera loop error: {}", e);
+                    break;
+                }
             }
         }
     }
 
     Ok(())
 }
+async fn render_loop(
+    ascii_converter: Arc<Mutex<AsciiConverter>>,
+    mut camera_frame_channel_rx: watch::Receiver<Frame>,
+    render_loop_cancel_token: CancellationToken,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    loop {
+        if render_loop_cancel_token.is_cancelled() {
+            break;
+        }
 
-async fn tcp_handler_loop(
+        let frame = camera_frame_channel_rx.borrow_and_update().clone();
+
+        let (width, height) = terminal::size()?;
+        let ascii = AsciiConverter::nibbles_to_ascii(&frame, width, height);
+        ascii_converter
+            .lock()
+            .await
+            .update_terminal_smooth(&ascii, width, height)?;
+
+        tokio::time::sleep(Duration::from_millis(16)).await;
+    }
+
+    Ok(())
+}
+
+async fn tcp_loop(
     tcp_stream: &mut TcpStream,
     sid_to_frame_map: Arc<Mutex<HashMap<StreamID, Option<Frame>>>>,
-    mut end_call_rx: broadcast::Receiver<()>,
+    tcp_loop_cancel_token: CancellationToken,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     loop {
         tokio::select! {
-
-            _ = end_call_rx.recv() => {
-
-                break;
-            }
-
             result = TcpCommand::read_from_stream(tcp_stream) => {
                 match result? {
                     ReceivedTcpCommand::EOF => {
                         return Err("Server closed connection.".into());
                     }
                     ReceivedTcpCommand::Command(command) => {
-
                         match command {
                             TcpCommand::Bytes(TcpCommandId::OtherUserJoinedRoom, sid) => {
                                 let sid: StreamID = sid[..].try_into()?;
@@ -170,50 +171,53 @@ async fn tcp_handler_loop(
 
                             _ => {}
                         }
+                    }
+                }
+            }
 
+            _ = tcp_loop_cancel_token.cancelled() => {
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn user_input_loop(
+    user_input_loop_cancel_token: CancellationToken,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    loop {
+        tokio::select! {
+            _ = user_input_loop_cancel_token.cancelled() => {
+                break;
+            }
+
+            result = async {
+                if event::poll(Duration::from_millis(50))? {
+                    if let Event::Key(key_event) = event::read()? {
+                        if key_event.code == KeyCode::Char('c')
+                            && key_event.modifiers.contains(KeyModifiers::CONTROL)
+                        {
+                            return Ok::<bool, Box<dyn Error + Send + Sync>>(true);
+                        }
+                    }
+                }
+                Ok::<bool, Box<dyn Error + Send + Sync>>(false)
+            } => {
+                match result {
+                    Ok(true) => break,
+                    Ok(false) => {},
+                    Err(e) => {
+                        eprintln!("Input loop error: {}", e);
+                        break;
                     }
                 }
             }
         }
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
     Ok(())
-}
-
-async fn draw_frames_loop(
-    mut draw_to_screen_rx: watch::Receiver<Vec<Frame>>,
-    mut end_call_rx: broadcast::Receiver<()>,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
-    loop {
-        tokio::select! {
-
-            _ = end_call_rx.recv() => {
-
-                break;
-            }
-
-            result = draw_to_screen_rx.changed() => {
-
-                result?;
-                let _frames = draw_to_screen_rx.borrow_and_update().clone();
-            }
-        }
-    }
-
-    Ok(())
-}
-
-async fn wait_for_ctrl_c_press() -> Result<(), Box<dyn Error + Send + Sync>> {
-    loop {
-        if let Event::Key(KeyEvent {
-            code: KeyCode::Char('c'),
-            modifiers,
-            ..
-        }) = event::read()?
-        {
-            if modifiers.contains(KeyModifiers::CONTROL) {
-                return Ok(());
-            }
-        }
-    }
 }

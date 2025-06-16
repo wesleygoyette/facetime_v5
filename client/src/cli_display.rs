@@ -30,16 +30,6 @@ impl CliDisplay {
     }
 
     pub fn print_current_user_left_room(room_name: &str) {
-        let mut stdout = stdout();
-
-        let _ = execute!(
-            stdout,
-            cursor::MoveToNextLine(1),
-            Clear(ClearType::CurrentLine),
-            cursor::MoveToColumn(0)
-        );
-
-        let _ = writeln!(stdout, "You have disconnected from '{}'", room_name);
-        let _ = stdout.flush();
+        println!("You have disconnected from '{}'", room_name);
     }
 }

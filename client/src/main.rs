@@ -1,7 +1,8 @@
+mod ascii_converter;
 mod call_interface;
+mod camera;
 mod cli_display;
 mod client;
-mod frame;
 mod pre_call_interface;
 mod raw_mode_guard;
 

@@ -8,7 +8,9 @@ name = "client"
 
 [dependencies]
 tokio = { version = "1.45.1", features = ["full"] }
+tokio-util = "0.7.15"
 shared = { path = "../shared" }
 clap = { version = "4.5.38", features = ["derive"] }
 rand = "0.9.1"
 crossterm = "0.29.0"
+opencv = "0.94.4"

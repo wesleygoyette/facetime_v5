@@ -68,7 +68,7 @@ impl WeSFU {
 
                         let mut current_username_option = None;
 
-                        if let Err(e) = TcpHandler::handle_stream(tcp_socket, &mut current_username_option, users.clone(), room_map.clone(), username_to_tcp_command_tx).await {
+                        if let Err(e) = TcpHandler::handle_stream(tcp_socket, &mut current_username_option, users.clone(), room_map.clone(), username_to_tcp_command_tx.clone()).await {
 
                             error!("Error handling TcpSocket: {}", e);
                         }
@@ -76,6 +76,10 @@ impl WeSFU {
                         if let Some(current_username) = current_username_option.take() {
 
                             users.write().await.retain(|user| user != &current_username);
+                            username_to_tcp_command_tx
+                            .lock()
+                            .await
+                            .remove(&current_username);
 
                             info!("{} has disconnected", current_username);
                         }
