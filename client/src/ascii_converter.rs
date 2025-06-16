@@ -1,6 +1,6 @@
 use core::error::Error;
 use crossterm::{
-    ExecutableCommand, QueueableCommand,
+    QueueableCommand,
     cursor::MoveTo,
     style::Print,
     terminal::{Clear, ClearType},
@@ -10,27 +10,33 @@ use opencv::{
     imgproc::{COLOR_BGR2GRAY, INTER_LINEAR, cvt_color, resize},
     prelude::*,
 };
-use std::io::{Write, stdout};
+use std::io::{BufWriter, Write, stdout};
 
-const ASCII_CHARS: &[char] = &[
-    ' ', '.', '^', '=', '~', '-', ',', ':', ';', '+', '*', '?', '%', 'S', '#', '@',
-];
+const ASCII_CHARS: &[u8] = b" .^=~-,:;+*?%S#@";
 
-pub const WIDTH: i32 = 92; //1920 / 3;
-pub const HEIGHT: i32 = 28; //1080 / 3;
+pub const WIDTH: i32 = 640;
+pub const HEIGHT: i32 = 360;
 
 pub type Frame = Vec<u8>;
 
 pub struct AsciiConverter {
     last_frame: Option<String>,
     terminal_size: Option<(u16, u16)>,
+    // Pre-allocated buffers
+    ascii_buffer: String,
+    grayscale_buffer: Vec<u8>,
+    writer: BufWriter<std::io::Stdout>,
 }
 
 impl AsciiConverter {
     pub fn new() -> Self {
+        let capacity = (WIDTH as usize) * (HEIGHT as usize);
         Self {
             last_frame: None,
             terminal_size: None,
+            ascii_buffer: String::with_capacity(capacity + HEIGHT as usize), // +HEIGHT for newlines
+            grayscale_buffer: Vec::with_capacity(capacity),
+            writer: BufWriter::with_capacity(8192, stdout()),
         }
     }
 
@@ -48,31 +54,33 @@ impl AsciiConverter {
             gray = frame.clone();
         }
 
-        let frame = gray;
-
         let mut resized = Mat::default();
         let size = Size::new(WIDTH, HEIGHT);
-        resize(&frame, &mut resized, size, 0.0, 0.0, INTER_LINEAR)?;
+        resize(&gray, &mut resized, size, 0.0, 0.0, INTER_LINEAR)?;
 
         let data = resized.data_bytes()?;
         let mut nibbles = Vec::with_capacity((WIDTH * HEIGHT / 2) as usize);
 
-        for row in 0..HEIGHT {
-            let row_start = (row * WIDTH) as usize;
+        // Pre-compute constants
+        let width_usize = WIDTH as usize;
+        let height_usize = HEIGHT as usize;
 
-            for col in (0..WIDTH).step_by(2) {
-                let x1 = WIDTH - 1 - col;
-                let x2 = if col + 1 < WIDTH {
-                    WIDTH - 1 - (col + 1)
+        for row in 0..height_usize {
+            let row_start = row * width_usize;
+
+            for col in (0..width_usize).step_by(2) {
+                let x1 = width_usize - 1 - col;
+                let x2 = if col + 1 < width_usize {
+                    width_usize - 1 - (col + 1)
                 } else {
                     0
                 };
 
-                let p1 = data[row_start + x1 as usize];
+                let p1 = data[row_start + x1];
                 let nibble1 = ((p1 as u16 * 15) / 255) as u8;
 
-                let nibble2 = if col + 1 < WIDTH {
-                    let p2 = data[row_start + x2 as usize];
+                let nibble2 = if col + 1 < width_usize {
+                    let p2 = data[row_start + x2];
                     ((p2 as u16 * 15) / 255) as u8
                 } else {
                     0
@@ -85,39 +93,58 @@ impl AsciiConverter {
         Ok(nibbles)
     }
 
-    pub fn nibbles_to_ascii(nibbles: &[u8], width: u16, height: u16) -> String {
-        let mut grayscale: Vec<u8> = Vec::with_capacity((WIDTH as usize) * (HEIGHT as usize));
-        for byte in nibbles {
-            let high = (byte >> 4) & 0x0F;
-            let low = byte & 0x0F;
-            grayscale.push(high);
-            grayscale.push(low);
+    pub fn nibbles_to_ascii(&mut self, nibbles: &[u8], width: u16, height: u16) -> &str {
+        // Reuse buffer instead of allocating
+        self.grayscale_buffer.clear();
+        self.grayscale_buffer
+            .reserve(WIDTH as usize * HEIGHT as usize);
+
+        // Use unsafe for faster unpacking (bounds are guaranteed)
+        unsafe {
+            self.grayscale_buffer.set_len(nibbles.len() * 2);
+            let mut i = 0;
+            for &byte in nibbles {
+                *self.grayscale_buffer.get_unchecked_mut(i) = (byte >> 4) & 0x0F;
+                *self.grayscale_buffer.get_unchecked_mut(i + 1) = byte & 0x0F;
+                i += 2;
+            }
         }
 
-        let mut ascii_art = String::with_capacity((width + 1) as usize * height as usize);
+        self.ascii_buffer.clear();
+
+        let width_f = width as f32;
+        let height_f = height as f32;
+        let width_scale = WIDTH as f32 / width_f;
+        let height_scale = (HEIGHT as f32 - 1.0) / height_f;
+        let width_usize = WIDTH as usize;
+        let ascii_chars_len_minus_1 = ASCII_CHARS.len() - 1;
+
         for y in 0..height {
-            let src_y = (y as f32 * (HEIGHT as f32 - 1.0) / (height as f32)).round() as i32;
-            let sy = (src_y.max(0).min(HEIGHT - 1)) as usize;
+            let src_y = (y as f32 * height_scale).round() as usize;
+            let sy = src_y.min(HEIGHT as usize - 1);
+            let row_offset = sy * width_usize;
 
             for x in 0..width {
-                let src_x = (x as f32 * (WIDTH as f32) / (width as f32)).round() as i32;
-                let sx = (src_x.max(0).min(WIDTH - 1)) as usize;
+                let src_x = (x as f32 * width_scale).round() as usize;
+                let sx = src_x.min(WIDTH as usize - 1);
+                let idx = row_offset + sx;
 
-                let idx = sy * WIDTH as usize + sx;
-                let pixel = if idx < grayscale.len() {
-                    grayscale[idx]
-                } else {
-                    0
+                let pixel = unsafe {
+                    *self
+                        .grayscale_buffer
+                        .get_unchecked(idx.min(self.grayscale_buffer.len() - 1))
                 };
 
-                let ascii_idx = (pixel as usize * (ASCII_CHARS.len() - 1)) / 15;
-                ascii_art.push(ASCII_CHARS[ascii_idx]);
+                let ascii_idx = (pixel as usize * ascii_chars_len_minus_1) / 15;
+                unsafe {
+                    self.ascii_buffer
+                        .push(*ASCII_CHARS.get_unchecked(ascii_idx) as char);
+                }
             }
-
-            ascii_art.push('\n');
+            self.ascii_buffer.push('\n');
         }
 
-        ascii_art
+        &self.ascii_buffer
     }
 
     pub fn update_terminal_smooth(
@@ -132,87 +159,67 @@ impl AsciiConverter {
             .unwrap_or(true);
 
         if size_changed {
-            Self::clear_terminal()?;
+            Self::clear_terminal_fast(&mut self.writer)?;
             self.terminal_size = Some((terminal_width, terminal_height));
             self.last_frame = None;
         }
 
         if size_changed || self.last_frame.is_none() {
-            let lines: Vec<&str> = new_content.lines().collect();
-            stdout().queue(MoveTo(0, 0))?;
-
-            for (line_num, line) in lines.iter().enumerate() {
-                stdout()
-                    .queue(MoveTo(0, line_num as u16))?
-                    .queue(Print(line))?;
-            }
-
-            let last_line_num = lines.len().saturating_sub(1) as u16;
-            let last_line_len = lines.last().map(|l| l.len()).unwrap_or(0) as u16;
-            stdout()
-                .queue(MoveTo(last_line_len, last_line_num))?
-                .flush()?;
-
+            self.render_full_frame(new_content)?;
             self.last_frame = Some(new_content.to_string());
             return Ok(());
         }
 
-        if let Some(ref last) = self.last_frame {
-            if self.try_differential_update(last, new_content)? {
-                self.last_frame = Some(new_content.to_string());
-
-                let lines: Vec<&str> = new_content.lines().collect();
-                let last_line_num = lines.len().saturating_sub(1) as u16;
-                let last_line_len = lines.last().map(|l| l.len()).unwrap_or(0) as u16;
-                stdout()
-                    .queue(MoveTo(last_line_len, last_line_num))?
-                    .flush()?;
-
-                return Ok(());
-            }
+        // Clone the last frame to avoid borrowing issues
+        let last_frame = self.last_frame.clone().unwrap();
+        if self.try_differential_update_fast(&last_frame, new_content)? {
+            self.last_frame = Some(new_content.to_string());
+            self.position_cursor_at_end(new_content)?;
+            return Ok(());
         }
 
-        let lines: Vec<&str> = new_content.lines().collect();
-        stdout().queue(MoveTo(0, 0))?;
-
-        for (line_num, line) in lines.iter().enumerate() {
-            stdout()
-                .queue(MoveTo(0, line_num as u16))?
-                .queue(Print(line))?;
-        }
-
-        if let Some(ref last) = self.last_frame {
-            let new_lines = new_content.lines().count();
-            let old_lines = last.lines().count();
-
-            if old_lines > new_lines {
-                for line_num in new_lines..old_lines {
-                    stdout()
-                        .queue(MoveTo(0, line_num as u16))?
-                        .queue(Clear(ClearType::CurrentLine))?;
-                }
-            }
-        }
-
-        let lines: Vec<&str> = new_content.lines().collect();
-        let last_line_num = lines.len().saturating_sub(1) as u16;
-        let last_line_len = lines.last().map(|l| l.len()).unwrap_or(0) as u16;
-        stdout()
-            .queue(MoveTo(last_line_len, last_line_num))?
-            .flush()?;
-
+        self.render_full_frame(new_content)?;
         self.last_frame = Some(new_content.to_string());
         Ok(())
     }
 
-    fn try_differential_update(
-        &self,
+    #[inline]
+    fn render_full_frame(&mut self, content: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.writer.queue(MoveTo(0, 0))?;
+
+        for (line_num, line) in content.lines().enumerate() {
+            self.writer
+                .queue(MoveTo(0, line_num as u16))?
+                .queue(Print(line))?;
+        }
+
+        self.position_cursor_at_end(content)?;
+        Ok(())
+    }
+
+    #[inline]
+    fn position_cursor_at_end(
+        &mut self,
+        content: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let lines: Vec<&str> = content.lines().collect();
+        let last_line_num = lines.len().saturating_sub(1) as u16;
+        let last_line_len = lines.last().map(|l| l.len()).unwrap_or(0) as u16;
+        self.writer
+            .queue(MoveTo(last_line_len, last_line_num))?
+            .flush()?;
+        Ok(())
+    }
+
+    fn try_differential_update_fast(
+        &mut self,
         old_content: &str,
         new_content: &str,
     ) -> Result<bool, Box<dyn Error + Send + Sync>> {
         let old_lines: Vec<&str> = old_content.lines().collect();
         let new_lines: Vec<&str> = new_content.lines().collect();
 
+        // Quick bailout for major changes
         if old_lines.len().abs_diff(new_lines.len()) > 5 {
             return Ok(false);
         }
@@ -228,60 +235,40 @@ impl AsciiConverter {
                 continue;
             }
 
-            let old_chars: Vec<char> = old_line.chars().collect();
-            let new_chars: Vec<char> = new_line.chars().collect();
-            let max_chars = old_chars.len().max(new_chars.len());
+            // Find changed regions more efficiently
+            let old_bytes = old_line.as_bytes();
+            let new_bytes = new_line.as_bytes();
+            let max_len = old_bytes.len().max(new_bytes.len());
 
-            let mut col = 0;
-            while col < max_chars {
-                let old_char = old_chars.get(col).copied().unwrap_or(' ');
-                let new_char = new_chars.get(col).copied().unwrap_or(' ');
-
-                if old_char != new_char {
-                    let start_col = col;
-                    let mut end_col = col;
-
-                    while end_col < max_chars {
-                        let old_c = old_chars.get(end_col).copied().unwrap_or(' ');
-                        let new_c = new_chars.get(end_col).copied().unwrap_or(' ');
-
-                        if old_c == new_c {
-                            break;
-                        }
-                        end_col += 1;
-                    }
-
-                    stdout().queue(MoveTo(start_col as u16, line_num as u16))?;
-
-                    if end_col <= new_chars.len() {
-                        let changed_str: String = new_chars[start_col..end_col].iter().collect();
-                        stdout().queue(Print(changed_str))?;
-                    } else {
-                        if start_col < new_chars.len() {
-                            let changed_str: String = new_chars[start_col..].iter().collect();
-                            stdout().queue(Print(changed_str))?;
-                        }
-                        stdout().queue(Clear(ClearType::UntilNewLine))?;
-                    }
-
-                    updated = true;
-                    col = end_col;
-                } else {
-                    col += 1;
+            // Find first difference
+            let mut start = 0;
+            while start < old_bytes.len().min(new_bytes.len()) {
+                if old_bytes[start] != new_bytes[start] {
+                    break;
                 }
+                start += 1;
             }
 
-            if new_chars.len() < old_chars.len() {
-                stdout()
-                    .queue(MoveTo(new_chars.len() as u16, line_num as u16))?
-                    .queue(Clear(ClearType::UntilNewLine))?;
+            if start < max_len {
+                self.writer.queue(MoveTo(start as u16, line_num as u16))?;
+
+                if start < new_bytes.len() {
+                    let changed_str = &new_line[start..];
+                    self.writer.queue(Print(changed_str))?;
+                }
+
+                if new_bytes.len() < old_bytes.len() {
+                    self.writer.queue(Clear(ClearType::UntilNewLine))?;
+                }
+
                 updated = true;
             }
         }
 
+        // Clear extra lines if new content is shorter
         if old_lines.len() > new_lines.len() {
             for line_num in new_lines.len()..old_lines.len() {
-                stdout()
+                self.writer
                     .queue(MoveTo(0, line_num as u16))?
                     .queue(Clear(ClearType::CurrentLine))?;
             }
@@ -289,21 +276,19 @@ impl AsciiConverter {
         }
 
         if updated {
-            let lines: Vec<&str> = new_content.lines().collect();
-            let last_line_num = lines.len().saturating_sub(1) as u16;
-            let last_line_len = lines.last().map(|l| l.len()).unwrap_or(0) as u16;
-            stdout()
-                .queue(MoveTo(last_line_len, last_line_num))?
-                .flush()?;
+            self.position_cursor_at_end(new_content)?;
         }
 
         Ok(true)
     }
 
-    pub fn clear_terminal() -> Result<(), Box<dyn Error + Send + Sync>> {
-        stdout()
-            .execute(Clear(ClearType::All))?
-            .execute(MoveTo(0, 0))?;
+    fn clear_terminal_fast(
+        writer: &mut BufWriter<std::io::Stdout>,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        writer
+            .queue(Clear(ClearType::All))?
+            .queue(MoveTo(0, 0))?
+            .flush()?;
         Ok(())
     }
 }

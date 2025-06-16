@@ -1,5 +1,6 @@
 use crate::ascii_converter::Frame;
 use crate::{ascii_converter::AsciiConverter, camera::Camera, raw_mode_guard::RawModeGuard};
+use atty::Stream;
 use core::error::Error;
 use crossterm::cursor::MoveTo;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
@@ -9,7 +10,7 @@ use shared::StreamID;
 use shared::received_tcp_command::ReceivedTcpCommand;
 use shared::tcp_command::TcpCommand;
 use shared::tcp_command_id::TcpCommandId;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Write, stdout};
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,7 +43,10 @@ impl CallInterface {
         let initial_frame = AsciiConverter::frame_to_nibbles(camera.get_frame().await?)?;
         let (camera_frame_channel_tx, camera_frame_channel_rx) = watch::channel(initial_frame);
 
-        let raw_mode_guard = RawModeGuard::new()?;
+        let mut raw_mode_guard = None;
+        if atty::is(Stream::Stdout) {
+            raw_mode_guard = Some(RawModeGuard::new());
+        }
         let sid_to_frame_map = Arc::new(Mutex::new(HashMap::new()));
         let udp_stream = Arc::new(udp_stream);
 
@@ -160,7 +164,9 @@ async fn render_loop(
                         }
                     }
 
-                    let new_content = render_frames_to_string(frames, width, height);
+                    let borrowed_frames: Vec<&Vec<u8>> = frames.iter().collect();
+                    let new_content = render_frames_to_string(&borrowed_frames, ascii_converter.clone(), width, height).await;
+
 
                     if new_content != last_content {
                         if let Ok(mut converter) = ascii_converter.try_lock() {
@@ -226,21 +232,37 @@ async fn udp_listener_loop(
     sid_to_frame_map: Arc<Mutex<HashMap<StreamID, Option<Frame>>>>,
     udp_listener_loop_cancel_token: CancellationToken,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let mut buf = [0; 1300];
+    let mut buf = [0; 1500];
+
+    let mut fragment_buffers: HashMap<StreamID, BTreeMap<u32, Vec<u8>>> = HashMap::new();
+    let max_chunks = 1000;
 
     loop {
         tokio::select! {
             result = udp_stream.recv(&mut buf) => {
                 if let Ok(n) = result {
-                    if n > StreamID::default().len() {
-                        if let Ok(sid) = <StreamID>::try_from(&buf[..StreamID::default().len()]) {
-                            let payload = &buf[StreamID::default().len()..n];
-                            let frame_data = payload.to_vec();
+                    let sid_len = StreamID::default().len();
+                    if n > sid_len + 4 {
+                        if let Ok(sid) = StreamID::try_from(&buf[..sid_len]) {
+                            let chunk_id = u32::from_be_bytes(buf[sid_len..sid_len + 4].try_into()?);
+                            let chunk_data = buf[sid_len + 4..n].to_vec();
 
-                            if let Ok(mut guard) = sid_to_frame_map.try_lock() {
-                                if let Some(frame_slot) = guard.get_mut(&sid) {
-                                    *frame_slot = Some(frame_data);
+                            let entry = fragment_buffers
+                                .entry(sid.clone())
+                                .or_insert_with(BTreeMap::new);
+                            entry.insert(chunk_id, chunk_data);
+
+                            if entry.len() >= max_chunks || entry.keys().copied().max().unwrap_or(0) == (entry.len() as u32 - 1) {
+                                let frame: Vec<u8> = entry
+                                    .iter()
+                                    .flat_map(|(_, chunk)| chunk.clone())
+                                    .collect();
+
+                                if let Ok(mut guard) = sid_to_frame_map.try_lock() {
+                                    guard.insert(sid.clone(), Some(frame));
                                 }
+
+                                fragment_buffers.remove(&sid);
                             }
                         }
                     }
@@ -268,9 +290,14 @@ async fn udp_send_loop(
             _ = interval.tick() => {
                 if camera_frame_channel_rx.has_changed().unwrap_or(false) {
                     let frame = camera_frame_channel_rx.borrow().clone();
-                    let mut payload = full_sid.clone();
-                    payload.extend(frame);
-                    let _ = udp_stream.send(&payload).await;
+
+                    for (i, chunk) in frame.chunks(1288).enumerate() {
+                        let mut packet = full_sid.clone();
+                        packet.extend_from_slice(&(i as u32).to_be_bytes());
+                        packet.extend_from_slice(chunk);
+                        let _ = udp_stream.send(&packet).await;
+                    }
+
                 }
             }
         }
@@ -304,54 +331,73 @@ async fn user_input_loop(
     Ok(())
 }
 
-fn render_frames_to_string(frames: Vec<Vec<u8>>, width: u16, height: u16) -> String {
-    match frames.len() {
-        0 => String::new(),
-        1 => {
-            let my_nibbles = &frames[0];
-            AsciiConverter::nibbles_to_ascii(my_nibbles, width, height)
+async fn render_frames_to_string(
+    frames: &[&Frame],
+    ascii_converter: Arc<Mutex<AsciiConverter>>,
+    width: u16,
+    height: u16,
+) -> String {
+    if frames.is_empty() {
+        return String::new();
+    }
+
+    let count = frames.len();
+    let (frame_width, frame_height, _layout_rows) = if count == 1 {
+        return ascii_converter
+            .lock()
+            .await
+            .nibbles_to_ascii(frames[0], width, height)
+            .to_string();
+    } else if count == 2 {
+        if (width as f64) * 0.38 < height as f64 {
+            let mut conv = ascii_converter.lock().await;
+            let top = conv
+                .nibbles_to_ascii(frames[0], width, (height - 1) / 2)
+                .to_string();
+            let bottom = conv
+                .nibbles_to_ascii(frames[1], width, (height - 1) / 2)
+                .to_string();
+            return format!("{}\n{}", top, bottom);
+        } else {
+            let mut conv = ascii_converter.lock().await;
+            let left = conv
+                .nibbles_to_ascii(frames[0], (width - 1) / 2, height - 1)
+                .to_string();
+            let right = conv
+                .nibbles_to_ascii(frames[1], (width - 1) / 2, height - 1)
+                .to_string();
+            return frames_side_by_side_to_string(&left, &right);
         }
-        2 => {
-            let my_nibbles = &frames[0];
-            let your_nibbles = &frames[1];
+    } else {
+        let rows = ((count + 1) / 2) as u16;
+        ((width - 2) / 2, (height - rows + 1) / rows, rows)
+    };
 
-            if (width as f64) * 0.38 < (height as f64) {
-                let frame1 = AsciiConverter::nibbles_to_ascii(my_nibbles, width, (height - 1) / 2);
-                let frame2 =
-                    AsciiConverter::nibbles_to_ascii(your_nibbles, width, (height - 1) / 2);
-                format!("{}\n{}", frame1, frame2)
-            } else {
-                let frame1 = AsciiConverter::nibbles_to_ascii(my_nibbles, (width - 1) / 2, height);
-                let frame2 =
-                    AsciiConverter::nibbles_to_ascii(your_nibbles, (width - 1) / 2, height);
-                frames_side_by_side_to_string(&frame1, &frame2)
-            }
-        }
-        len => {
-            let num_rows = ((len + 1) / 2) as u16;
-            let frame_height = (height - num_rows + 1) / num_rows;
-            let frame_width = (width - 2) / 2;
+    let mut result = String::with_capacity(8192);
+    let mut ascii_frames = Vec::with_capacity(count);
 
-            let ascii_frames: Vec<String> = frames
-                .iter()
-                .map(|f| AsciiConverter::nibbles_to_ascii(f, frame_width, frame_height))
-                .collect();
-
-            let mut result = String::new();
-            for (idx, pair) in ascii_frames.chunks(2).enumerate() {
-                if idx > 0 {
-                    result.push('\n');
-                    result.push('\n');
-                }
-                if pair.len() == 2 {
-                    result.push_str(&frames_side_by_side_to_string(&pair[0], &pair[1]));
-                } else {
-                    result.push_str(&pair[0]);
-                }
-            }
-            result
+    {
+        let mut conv = ascii_converter.lock().await;
+        for &frame in frames {
+            ascii_frames.push(
+                conv.nibbles_to_ascii(frame, frame_width, frame_height)
+                    .to_string(),
+            );
         }
     }
+
+    for (i, pair) in ascii_frames.chunks(2).enumerate() {
+        if i > 0 {
+            result.push_str("\n\n");
+        }
+        match pair {
+            [left, right] => result.push_str(&frames_side_by_side_to_string(left, right)),
+            [only] => result.push_str(only),
+            _ => {}
+        }
+    }
+
+    result
 }
 
 pub fn frames_side_by_side_to_string(frame1: &str, frame2: &str) -> String {
