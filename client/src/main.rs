@@ -6,6 +6,7 @@ mod client;
 mod frame_generator;
 mod pre_call_interface;
 mod raw_mode_guard;
+mod udp_handler;
 
 use clap::Parser;
 use rand::{Rng, rng, seq::IndexedRandom};
