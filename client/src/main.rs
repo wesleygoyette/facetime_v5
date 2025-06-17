@@ -3,33 +3,50 @@ mod call_interface;
 mod camera;
 mod cli_display;
 mod client;
+mod frame_generator;
 mod pre_call_interface;
 mod raw_mode_guard;
 
 use clap::Parser;
 use rand::{Rng, rng, seq::IndexedRandom};
 
-use crate::client::Client;
+use crate::{camera::Camera, client::Client};
 
 #[derive(Parser, Debug)]
 struct Args {
     #[arg(short, long)]
     username: Option<String>,
 
-    #[arg(short, long, default_value = "127.0.0.1")]
+    #[arg(short, long, default_value = "213.188.199.174")]
     server_address: String,
+
+    #[arg(short, long, default_value = "0")]
+    camera: String,
 }
 
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
 
+    let camera_index = match args.camera.parse() {
+        Ok(idx) => idx,
+        _ => {
+            eprintln!("Invalid camera");
+            return;
+        }
+    };
+
+    if !Camera::is_valid_camera_name(&args.camera) {
+        eprintln!("Camera not found");
+        return;
+    }
+
     let username = match args.username {
         Some(username) => username,
         None => generate_username(),
     };
 
-    if let Err(e) = Client::run(&args.server_address, &username).await {
+    if let Err(e) = Client::run(&args.server_address, &username, camera_index).await {
         eprintln!("{}", e);
     }
 }

@@ -1,5 +1,5 @@
 use core::error::Error;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead};
 
 use shared::{
     RoomID, StreamID, received_tcp_command::ReceivedTcpCommand, tcp_command::TcpCommand,
@@ -7,34 +7,37 @@ use shared::{
 };
 use tokio::net::TcpStream;
 
-use crate::cli_display::{CliDisplay, PROMPT_STR};
+use crate::{camera::Camera, cli_display::CliDisplay};
 
 pub struct PreCallInterface;
 
 impl PreCallInterface {
     pub async fn run(
         tcp_stream: &mut TcpStream,
+        current_username: &str,
+        camera_index: &mut i32,
     ) -> Result<Option<(String, Vec<u8>)>, Box<dyn Error + Send + Sync>> {
         let stdin = io::stdin();
         let mut reader = stdin.lock();
 
         loop {
-            print!("{}", PROMPT_STR);
-            io::stdout().flush()?;
+            CliDisplay::print_prompt();
             let mut line = String::new();
             if let Ok(n) = reader.read_line(&mut line) {
                 if n == 0 {
                     return Ok(None);
                 }
 
-                let line = line.trim().to_lowercase();
+                let line = line.trim();
 
                 if line == "exit" {
                     println!("Exiting...");
                     return Ok(None);
                 }
 
-                let call_info_option = Self::handle_user_input(&line, tcp_stream).await?;
+                let call_info_option =
+                    Self::handle_user_input(&line, tcp_stream, current_username, camera_index)
+                        .await?;
 
                 if let Some(call_info) = call_info_option {
                     return Ok(Some(call_info));
@@ -46,15 +49,23 @@ impl PreCallInterface {
     async fn handle_user_input(
         input: &str,
         tcp_stream: &mut TcpStream,
+        current_username: &str,
+        camera_index: &mut i32,
     ) -> Result<Option<(String, Vec<u8>)>, Box<dyn Error + Send + Sync>> {
-        match input {
+        let lowercase_input = input.to_lowercase();
+
+        match lowercase_input.as_str() {
             "" => {}
+
+            "help" => {
+                CliDisplay::print_command_help();
+            }
 
             "create room" => {
                 eprintln!("Usage: create room <string>");
             }
             command if command.starts_with("create room ") => {
-                let command_parts: Vec<&str> = command.split(" ").collect();
+                let command_parts: Vec<&str> = input.split(" ").collect();
 
                 if command_parts.len() != 3 {
                     eprintln!("Usage: create room <string>");
@@ -68,7 +79,7 @@ impl PreCallInterface {
                 eprintln!("Usage: delete room <string>");
             }
             command if command.starts_with("delete room ") => {
-                let command_parts: Vec<&str> = command.split(" ").collect();
+                let command_parts: Vec<&str> = input.split(" ").collect();
 
                 if command_parts.len() != 3 {
                     eprintln!("Usage: delete room <string>");
@@ -82,7 +93,7 @@ impl PreCallInterface {
                 eprintln!("Usage: join room <string>");
             }
             command if command.starts_with("join room ") => {
-                let command_parts: Vec<&str> = command.split(" ").collect();
+                let command_parts: Vec<&str> = input.split(" ").collect();
 
                 if command_parts.len() != 3 {
                     eprintln!("Usage: join room <string>");
@@ -93,11 +104,38 @@ impl PreCallInterface {
             }
 
             "list users" => {
-                list_users(tcp_stream).await?;
+                list_users(tcp_stream, current_username).await?;
             }
 
             "list rooms" => {
                 list_rooms(tcp_stream).await?;
+            }
+
+            "list cameras" => {
+                let available_cameras = Camera::list_available_cameras();
+
+                CliDisplay::print_camera_list(&available_cameras, *camera_index);
+            }
+
+            "switch camera" => {
+                eprintln!("Usage: switch camera [index]");
+            }
+            command if command.starts_with("switch camera ") => {
+                let command_parts: Vec<&str> = input.split(" ").collect();
+
+                if command_parts.len() != 3 {
+                    eprintln!("Usage: switch camera [index]");
+                } else {
+                    let camera_name = command_parts[2].to_string();
+
+                    if Camera::is_valid_camera_name(&camera_name) {
+                        *camera_index = camera_name.parse()?;
+
+                        println!("Successfully switched to Camera {}", *camera_index);
+                    } else {
+                        eprintln!("Unknown camera")
+                    }
+                }
             }
 
             _ => {
@@ -109,7 +147,10 @@ impl PreCallInterface {
     }
 }
 
-async fn list_users(tcp_stream: &mut TcpStream) -> Result<(), Box<dyn Error + Send + Sync>> {
+async fn list_users(
+    tcp_stream: &mut TcpStream,
+    current_username: &str,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     TcpCommand::Simple(TcpCommandId::GetUserList)
         .write_to_stream(tcp_stream)
         .await?;
@@ -128,7 +169,7 @@ async fn list_users(tcp_stream: &mut TcpStream) -> Result<(), Box<dyn Error + Se
         _ => return Err("Invalid command from server during list_users".into()),
     };
 
-    CliDisplay::print_user_list(&users);
+    CliDisplay::print_user_list(&users, current_username);
 
     Ok(())
 }
@@ -176,7 +217,7 @@ async fn create_room(
 
     match received_command {
         TcpCommand::Simple(TcpCommandId::CreateRoomSuccess) => {
-            println!("Successfully created room '{}'.", room_name);
+            println!("Successfully created room '{}'.\n", room_name);
             Ok(())
         }
         TcpCommand::String(TcpCommandId::ErrorResponse, error) => {
@@ -206,7 +247,7 @@ async fn delete_room(
 
     match received_command {
         TcpCommand::Simple(TcpCommandId::DeleteRoomSuccess) => {
-            println!("Successfully deleted room '{}'.", room_name);
+            println!("Successfully deleted room '{}'.\n", room_name);
             Ok(())
         }
         TcpCommand::String(TcpCommandId::ErrorResponse, error) => {

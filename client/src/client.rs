@@ -16,6 +16,7 @@ impl Client {
     pub async fn run(
         server_addr: &str,
         username: &str,
+        mut camera_index: i32,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let server_tcp_addr = format!("{}:{}", server_addr, TCP_PORT);
         let server_udp_addr = format!("{}:{}", server_addr, UDP_PORT);
@@ -26,14 +27,17 @@ impl Client {
         CliDisplay::print_connected_message(server_addr, username);
 
         loop {
-            let call_info_option = PreCallInterface::run(&mut tcp_stream).await?;
+            let call_info_option =
+                PreCallInterface::run(&mut tcp_stream, username, &mut camera_index).await?;
 
             match call_info_option {
                 Some((room_name, full_sid)) => {
                     let udp_stream = UdpSocket::bind("0.0.0.0:0").await?;
                     udp_stream.connect(&server_udp_addr).await?;
 
-                    if let Err(e) = CallInterface::run(&full_sid, &mut tcp_stream, udp_stream).await
+                    if let Err(e) =
+                        CallInterface::run(&full_sid, &mut tcp_stream, udp_stream, camera_index)
+                            .await
                     {
                         eprintln!("Call Error: {}", e);
                     }

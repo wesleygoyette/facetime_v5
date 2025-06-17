@@ -22,7 +22,6 @@ pub type Frame = Vec<u8>;
 pub struct AsciiConverter {
     last_frame: Option<String>,
     terminal_size: Option<(u16, u16)>,
-    // Pre-allocated buffers
     ascii_buffer: String,
     grayscale_buffer: Vec<u8>,
     writer: BufWriter<std::io::Stdout>,
@@ -34,7 +33,7 @@ impl AsciiConverter {
         Self {
             last_frame: None,
             terminal_size: None,
-            ascii_buffer: String::with_capacity(capacity + HEIGHT as usize), // +HEIGHT for newlines
+            ascii_buffer: String::with_capacity(capacity + HEIGHT as usize),
             grayscale_buffer: Vec::with_capacity(capacity),
             writer: BufWriter::with_capacity(8192, stdout()),
         }
@@ -61,7 +60,6 @@ impl AsciiConverter {
         let data = resized.data_bytes()?;
         let mut nibbles = Vec::with_capacity((WIDTH * HEIGHT / 2) as usize);
 
-        // Pre-compute constants
         let width_usize = WIDTH as usize;
         let height_usize = HEIGHT as usize;
 
@@ -94,12 +92,10 @@ impl AsciiConverter {
     }
 
     pub fn nibbles_to_ascii(&mut self, nibbles: &[u8], width: u16, height: u16) -> &str {
-        // Reuse buffer instead of allocating
         self.grayscale_buffer.clear();
         self.grayscale_buffer
             .reserve(WIDTH as usize * HEIGHT as usize);
 
-        // Use unsafe for faster unpacking (bounds are guaranteed)
         unsafe {
             self.grayscale_buffer.set_len(nibbles.len() * 2);
             let mut i = 0;
@@ -170,7 +166,6 @@ impl AsciiConverter {
             return Ok(());
         }
 
-        // Clone the last frame to avoid borrowing issues
         let last_frame = self.last_frame.clone().unwrap();
         if self.try_differential_update_fast(&last_frame, new_content)? {
             self.last_frame = Some(new_content.to_string());
@@ -219,7 +214,6 @@ impl AsciiConverter {
         let old_lines: Vec<&str> = old_content.lines().collect();
         let new_lines: Vec<&str> = new_content.lines().collect();
 
-        // Quick bailout for major changes
         if old_lines.len().abs_diff(new_lines.len()) > 5 {
             return Ok(false);
         }
@@ -235,12 +229,10 @@ impl AsciiConverter {
                 continue;
             }
 
-            // Find changed regions more efficiently
             let old_bytes = old_line.as_bytes();
             let new_bytes = new_line.as_bytes();
             let max_len = old_bytes.len().max(new_bytes.len());
 
-            // Find first difference
             let mut start = 0;
             while start < old_bytes.len().min(new_bytes.len()) {
                 if old_bytes[start] != new_bytes[start] {
@@ -265,7 +257,6 @@ impl AsciiConverter {
             }
         }
 
-        // Clear extra lines if new content is shorter
         if old_lines.len() > new_lines.len() {
             for line_num in new_lines.len()..old_lines.len() {
                 self.writer

@@ -1,6 +1,5 @@
 use crate::ascii_converter::Frame;
 use crate::{ascii_converter::AsciiConverter, camera::Camera, raw_mode_guard::RawModeGuard};
-use atty::Stream;
 use core::error::Error;
 use crossterm::cursor::MoveTo;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
@@ -17,7 +16,10 @@ use std::time::Duration;
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::{Mutex, watch};
 use tokio::task::JoinHandle;
+use tokio::time::{Instant, interval};
 use tokio_util::sync::CancellationToken;
+
+const CHUNK_TIMEOUT: Duration = Duration::from_millis(10);
 
 pub struct CallInterface;
 
@@ -26,10 +28,12 @@ impl CallInterface {
         full_sid: &[u8],
         tcp_stream: &mut TcpStream,
         udp_stream: UdpSocket,
+        camera_index: i32,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         println!("Starting camera ASCII feed... Press Ctrl+C to exit");
 
-        let mut camera = Camera::new()?;
+        let mut camera = Camera::new(camera_index)?;
+
         let ascii_converter = Arc::new(Mutex::new(AsciiConverter::new()));
 
         let cancel_token = CancellationToken::new();
@@ -43,10 +47,7 @@ impl CallInterface {
         let initial_frame = AsciiConverter::frame_to_nibbles(camera.get_frame().await?)?;
         let (camera_frame_channel_tx, camera_frame_channel_rx) = watch::channel(initial_frame);
 
-        let mut raw_mode_guard = None;
-        if atty::is(Stream::Stdout) {
-            raw_mode_guard = Some(RawModeGuard::new());
-        }
+        let raw_mode_guard = RawModeGuard::new();
         let sid_to_frame_map = Arc::new(Mutex::new(HashMap::new()));
         let udp_stream = Arc::new(udp_stream);
 
@@ -226,6 +227,10 @@ async fn tcp_loop(
 
     Ok(())
 }
+struct FragmentBuffer {
+    chunks: BTreeMap<u32, Vec<u8>>,
+    last_update: Instant,
+}
 
 async fn udp_listener_loop(
     udp_stream: Arc<UdpSocket>,
@@ -233,40 +238,48 @@ async fn udp_listener_loop(
     udp_listener_loop_cancel_token: CancellationToken,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut buf = [0; 1500];
-
-    let mut fragment_buffers: HashMap<StreamID, BTreeMap<u32, Vec<u8>>> = HashMap::new();
-    let max_chunks = 1000;
+    let mut fragment_buffers: HashMap<StreamID, FragmentBuffer> = HashMap::new();
 
     loop {
         tokio::select! {
             result = udp_stream.recv(&mut buf) => {
                 if let Ok(n) = result {
                     let sid_len = StreamID::default().len();
-                    if n > sid_len + 4 {
+                    if n > sid_len + 5 {
                         if let Ok(sid) = StreamID::try_from(&buf[..sid_len]) {
                             let chunk_id = u32::from_be_bytes(buf[sid_len..sid_len + 4].try_into()?);
-                            let chunk_data = buf[sid_len + 4..n].to_vec();
+                            let is_last = buf[sid_len + 4] == 1;
+                            let chunk_data = buf[sid_len + 5..n].to_vec();
 
-                            let entry = fragment_buffers
-                                .entry(sid.clone())
-                                .or_insert_with(BTreeMap::new);
-                            entry.insert(chunk_id, chunk_data);
+                            let entry = fragment_buffers.entry(sid.clone()).or_insert(FragmentBuffer {
+                                chunks: BTreeMap::new(),
+                                last_update: Instant::now(),
+                            });
 
-                            if entry.len() >= max_chunks || entry.keys().copied().max().unwrap_or(0) == (entry.len() as u32 - 1) {
-                                let frame: Vec<u8> = entry
-                                    .iter()
-                                    .flat_map(|(_, chunk)| chunk.clone())
-                                    .collect();
+                            entry.chunks.insert(chunk_id, chunk_data);
+                            entry.last_update = Instant::now();
 
-                                if let Ok(mut guard) = sid_to_frame_map.try_lock() {
-                                    guard.insert(sid.clone(), Some(frame));
+                            if is_last {
+                                let expected_chunks = chunk_id + 1;
+                                if entry.chunks.len() == expected_chunks as usize {
+                                    let frame: Vec<u8> = entry
+                                        .chunks
+                                        .iter()
+                                        .flat_map(|(_, chunk)| chunk.clone())
+                                        .collect();
+
+                                    if let Ok(mut guard) = sid_to_frame_map.try_lock() {
+                                        guard.insert(sid.clone(), Some(frame));
+                                    }
+
+                                    fragment_buffers.remove(&sid);
                                 }
-
-                                fragment_buffers.remove(&sid);
                             }
                         }
                     }
                 }
+
+                fragment_buffers.retain(|_, fb| fb.last_update.elapsed() < CHUNK_TIMEOUT);
             }
 
             _ = udp_listener_loop_cancel_token.cancelled() => break,
@@ -282,7 +295,7 @@ async fn udp_send_loop(
     full_sid: Vec<u8>,
     udp_send_loop_cancel_token: CancellationToken,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let mut interval = tokio::time::interval(Duration::from_millis(30));
+    let mut interval = interval(Duration::from_millis(30));
 
     loop {
         tokio::select! {
@@ -290,14 +303,15 @@ async fn udp_send_loop(
             _ = interval.tick() => {
                 if camera_frame_channel_rx.has_changed().unwrap_or(false) {
                     let frame = camera_frame_channel_rx.borrow().clone();
+                    let total_chunks = frame.chunks(1300).count();
 
-                    for (i, chunk) in frame.chunks(1288).enumerate() {
+                    for (i, chunk) in frame.chunks(1300).enumerate() {
                         let mut packet = full_sid.clone();
                         packet.extend_from_slice(&(i as u32).to_be_bytes());
+                        packet.push(if i + 1 == total_chunks { 1 } else { 0 });
                         packet.extend_from_slice(chunk);
                         let _ = udp_stream.send(&packet).await;
                     }
-
                 }
             }
         }
