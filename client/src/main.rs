@@ -1,5 +1,6 @@
 mod ascii_converter;
 mod call_interface;
+mod call_renderer;
 mod camera;
 mod cli_display;
 mod client;

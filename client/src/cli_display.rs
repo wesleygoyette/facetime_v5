@@ -62,7 +62,7 @@ impl CliDisplay {
     }
 
     pub fn print_camera_list(camera_list: &[String], current_camera_index: i32) {
-        let content = if camera_list.is_empty() {
+        let mut content = if camera_list.is_empty() {
             vec!["(no cameras available)".to_string()]
         } else {
             camera_list
@@ -93,8 +93,14 @@ impl CliDisplay {
                 .collect::<Vec<_>>()
         };
 
+        content.push(String::new());
+
+        content.push(format!(
+            "You are currently using camera {}",
+            current_camera_index
+        ));
+
         draw_box("Available Cameras", &content);
-        println!("You are currently using Camera {}", current_camera_index);
         println!();
     }
 
@@ -113,15 +119,13 @@ impl CliDisplay {
 
     pub fn print_command_help() {
         println!("\nAvailable Commands:");
-        println!("    - list users              : Lists all connected users");
-        println!("    - list rooms              : Lists all available rooms");
-        println!("    - list cameras            : Lists all available cameras");
-        println!("    - switch camera [index]   : Switches to camera at index");
-        println!("    - create room <string>    : Creates a new room");
-        println!("    - delete room <string>    : Deletes a room");
-        println!("    - join room <string>      : Joins a specific room");
-        println!("    - help                    : Displays a list of available commands");
-        println!("    - exit                    : Quits the application\n");
+        println!("    - list users|rooms|cameras   : Lists users, rooms, or available cameras");
+        println!("    - switch camera [index]      : Switches to camera at index");
+        println!("    - create room <string>       : Creates a new room");
+        println!("    - delete room <string>       : Deletes a room");
+        println!("    - join room <string>         : Joins a specific room");
+        println!("    - help                       : Displays a list of available commands");
+        println!("    - exit                       : Quits the application\n");
     }
 
     pub fn clear_screen() {

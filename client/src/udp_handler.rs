@@ -9,7 +9,7 @@ use shared::StreamID;
 use tokio::{
     net::UdpSocket,
     sync::{Mutex, watch},
-    time::{Instant, interval},
+    time::Instant,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -40,27 +40,26 @@ pub async fn udp_listener_loop(
                         if let Ok(sid) = StreamID::try_from(&buf[..sid_len]) {
                             let chunk_id = u32::from_be_bytes(buf[sid_len..sid_len + 4].try_into()?);
                             let is_last = buf[sid_len + 4] == 1;
-                            let chunk_data = buf[sid_len + 5..n].to_vec();
+                            let chunk_data = &buf[sid_len + 5..n];
 
                             let entry = fragment_buffers.entry(sid.clone()).or_insert(FragmentBuffer {
                                 chunks: BTreeMap::new(),
                                 last_update: Instant::now(),
                             });
 
-                            entry.chunks.insert(chunk_id, chunk_data);
+                            entry.chunks.insert(chunk_id, chunk_data.to_vec());
                             entry.last_update = Instant::now();
 
                             if is_last {
                                 let expected_chunks = chunk_id + 1;
                                 if entry.chunks.len() == expected_chunks as usize {
-                                    let frame: Vec<u8> = entry
-                                        .chunks
-                                        .iter()
-                                        .flat_map(|(_, chunk)| chunk.clone())
-                                        .collect();
+                                    let mut frame_data = Vec::with_capacity(expected_chunks as usize * CHUNK_SIZE);
+                                    for chunk in entry.chunks.values() {
+                                        frame_data.extend(chunk);
+                                    }
 
                                     if let Ok(mut guard) = sid_to_frame_map.try_lock() {
-                                        guard.insert(sid.clone(), Some(frame));
+                                        guard.insert(sid.clone(), Some(frame_data));
                                     }
 
                                     fragment_buffers.remove(&sid);
@@ -82,27 +81,23 @@ pub async fn udp_listener_loop(
 
 pub async fn udp_send_loop(
     udp_stream: Arc<UdpSocket>,
-    camera_frame_channel_rx: watch::Receiver<Frame>,
+    mut camera_frame_channel_rx: watch::Receiver<Frame>,
     full_sid: Vec<u8>,
     udp_send_loop_cancel_token: CancellationToken,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let mut interval = interval(Duration::from_millis(30));
-
     loop {
         tokio::select! {
             _ = udp_send_loop_cancel_token.cancelled() => break,
-            _ = interval.tick() => {
-                if camera_frame_channel_rx.has_changed().unwrap_or(false) {
-                    let frame = camera_frame_channel_rx.borrow().clone();
-                    let total_chunks = frame.chunks(CHUNK_SIZE).count();
+            _ = camera_frame_channel_rx.changed() => {
+                let frame = camera_frame_channel_rx.borrow().clone();
+                let total_chunks = frame.chunks(CHUNK_SIZE).count();
 
-                    for (i, chunk) in frame.chunks(CHUNK_SIZE).enumerate() {
-                        let mut packet = full_sid.clone();
-                        packet.extend_from_slice(&(i as u32).to_be_bytes());
-                        packet.push(if i + 1 == total_chunks { 1 } else { 0 });
-                        packet.extend_from_slice(chunk);
-                        let _ = udp_stream.send(&packet).await;
-                    }
+                for (i, chunk) in frame.chunks(CHUNK_SIZE).enumerate() {
+                    let mut packet = full_sid.clone();
+                    packet.extend_from_slice(&(i as u32).to_be_bytes());
+                    packet.push((i + 1 == total_chunks) as u8);
+                    packet.extend_from_slice(chunk);
+                    let _ = udp_stream.send(&packet).await;
                 }
             }
         }
