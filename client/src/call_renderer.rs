@@ -243,11 +243,6 @@ fn center_frame(frame: &str, container_width: u16, container_height: u16) -> Str
     }
 
     let frame_height = lines.len();
-    let frame_width = lines
-        .iter()
-        .map(|line| line.chars().count())
-        .max()
-        .unwrap_or(0);
 
     let container_width = container_width as usize;
     let container_height = container_height as usize;
@@ -267,7 +262,7 @@ fn center_frame(frame: &str, container_width: u16, container_height: u16) -> Str
     }
 
     // Content lines
-    for (i, line) in lines.iter().enumerate() {
+    for line in lines.iter() {
         if !result.is_empty() {
             result.push('\n');
         }
