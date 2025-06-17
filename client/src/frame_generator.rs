@@ -6,9 +6,11 @@ use strum_macros::{Display, EnumIter};
 
 #[derive(EnumIter, Display)]
 pub enum CameraTestMode {
-    // #[strum(serialize = "spiral")]
+    #[strum(serialize = "spiral")]
     SpiralTunnel,
+    #[strum(serialize = "vortex")]
     VortexGrid,
+    #[strum(serialize = "diamond")]
     DiamondFlow,
 }
 

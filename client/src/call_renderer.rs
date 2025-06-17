@@ -57,7 +57,6 @@ async fn render_two_frames(
     height: u16,
     target_aspect_ratio: f64,
 ) -> String {
-    // Calculate both layouts
     let vertical_spacing = 1;
     let horizontal_spacing = 2;
 
@@ -74,28 +73,26 @@ async fn render_two_frames(
     let mut conv = ascii_converter.lock().await;
 
     if vertical_area >= horizontal_area {
-        // Vertical layout
         let top = conv
             .nibbles_to_ascii(frames[0], v_width, v_height)
             .to_string();
         let bottom = conv
             .nibbles_to_ascii(frames[1], v_width, v_height)
             .to_string();
-        drop(conv); // Release lock early
+        drop(conv);
 
         let centered_top = center_frame(&top, width, available_height_per_frame);
         let centered_bottom = center_frame(&bottom, width, available_height_per_frame);
 
         format!("{}\n{}", centered_top, centered_bottom)
     } else {
-        // Horizontal layout
         let left = conv
             .nibbles_to_ascii(frames[0], h_width, h_height)
             .to_string();
         let right = conv
             .nibbles_to_ascii(frames[1], h_width, h_height)
             .to_string();
-        drop(conv); // Release lock early
+        drop(conv);
 
         let centered_left = center_frame(&left, available_width_per_frame, height);
         let centered_right = center_frame(&right, available_width_per_frame, height);
@@ -128,11 +125,9 @@ async fn render_multiple_frames(
         target_aspect_ratio,
     );
 
-    // Pre-allocate with estimated capacity
     let estimated_capacity = (frame_width as usize * frame_height as usize * count) + (count * 100);
     let mut ascii_frames = Vec::with_capacity(count);
 
-    // Process all frames while holding the lock once
     {
         let mut conv = ascii_converter.lock().await;
         for &frame in frames {
@@ -148,7 +143,6 @@ async fn render_multiple_frames(
         }
     }
 
-    // Build result string
     let mut result = String::with_capacity(estimated_capacity);
     for row in 0..rows {
         if row > 0 {
@@ -249,11 +243,9 @@ fn center_frame(frame: &str, container_width: u16, container_height: u16) -> Str
 
     let vertical_padding = container_height.saturating_sub(frame_height) / 2;
 
-    // Pre-calculate capacity for better performance
     let estimated_capacity = container_width * container_height + container_height;
     let mut result = String::with_capacity(estimated_capacity);
 
-    // Top padding
     for i in 0..vertical_padding {
         if i > 0 {
             result.push('\n');
@@ -261,7 +253,6 @@ fn center_frame(frame: &str, container_width: u16, container_height: u16) -> Str
         result.extend(std::iter::repeat(' ').take(container_width));
     }
 
-    // Content lines
     for line in lines.iter() {
         if !result.is_empty() {
             result.push('\n');
@@ -275,8 +266,6 @@ fn center_frame(frame: &str, container_width: u16, container_height: u16) -> Str
         result.push_str(line);
         result.extend(std::iter::repeat(' ').take(remaining_width));
     }
-
-    // Bottom padding
     let remaining_lines = container_height.saturating_sub(vertical_padding + frame_height);
     for _ in 0..remaining_lines {
         result.push('\n');
