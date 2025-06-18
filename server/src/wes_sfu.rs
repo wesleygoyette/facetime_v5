@@ -36,7 +36,11 @@ impl WeSFU {
     pub async fn listen(self) -> Result<(), Box<dyn Error + Send + Sync>> {
         let mut udp_task: tokio::task::JoinHandle<Result<(), Box<dyn Error + Send + Sync>>> =
             tokio::spawn(async move {
-                UdpHandler::handle_socket(self.udp_socket, self.room_map_for_udp).await?;
+                let handler = UdpHandler::new();
+
+                handler
+                    .handle_socket(self.udp_socket, self.room_map_for_udp)
+                    .await?;
 
                 return Ok(());
             });
