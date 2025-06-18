@@ -19,7 +19,7 @@
 
 ## Demo
 
-![Demo](assets/demo.gif)
+![Demo](https://i.imgur.com/PsFqo2E.gif)
 
 ## Getting Started
 
