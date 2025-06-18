@@ -17,25 +17,9 @@
 * **TCP (Control Plane):** Room creation, user registration, camera switching.
 * **UDP (Media Plane):** Frame chunking, transmission, and reconstruction.
 
-## Example Session
+## Demo
 
-```text
-╔══ Connected to WeSFU (version 5) ══╗
-║ Time: 2025-06-17 19:22:51          ║
-║ Server: 213.188.199.174            ║
-║ User: fast-lion6677                ║
-║ Status: Connection OK              ║
-╚════════════════════════════════════╝
-
-Available Commands:
-    - list users|rooms|cameras   : Lists users, rooms, or available cameras
-    - switch camera [index]      : Switches to camera at index
-    - create room <string>       : Creates a new room
-    - delete room <string>       : Deletes a room
-    - join room <string>         : Joins a specific room
-    - help                       : Displays a list of available commands
-    - exit                       : Quits the application
-```
+![Demo](assets/demo.gif)
 
 ## Getting Started
 
