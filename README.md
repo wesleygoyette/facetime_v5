@@ -40,13 +40,24 @@ cd facetime_v5
 
 #### macOS Users
 
-A convenience script is provided in the project root:
+A convenience script is provided in the project root to handle macOS-specific setup:
 
 ```bash
 ./build-client-macos.sh
 ```
 
-This will build the client binary with appropriate OpenCV linkage for macOS.
+This script:
+
+* Installs **Rust** via `rustup` if it’s not already installed.
+* Installs **Homebrew** if missing, then uses it to install:
+
+  * `llvm` – for C++ headers and `libclang`
+  * `opencv` – for camera capture and image processing
+* Configures environment variables:
+
+  * `CPATH` (if needed) for C++ standard headers
+  * `LIBCLANG_PATH` and `DYLD_LIBRARY_PATH` for proper linking
+* Builds the `client` binary in release mode using Cargo.
 
 #### Manual Build
 
