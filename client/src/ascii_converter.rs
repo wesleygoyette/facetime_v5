@@ -14,8 +14,8 @@ use std::io::{BufWriter, Write, stdout};
 
 const ASCII_CHARS: &[u8] = b" .^=~-,:;+*?%S#@";
 
-pub const WIDTH: i32 = 320;
-pub const HEIGHT: i32 = 180;
+pub const WIDTH: i32 = 420;
+pub const HEIGHT: i32 = 236;
 
 pub type Frame = Vec<u8>;
 
