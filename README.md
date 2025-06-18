@@ -49,14 +49,14 @@ Available Commands:
 
 * Rust (1.72 or newer)
 * OpenCV (installed and linked on your system)
-* terminal emulator
+* Terminal emulator
 
 ### Build Instructions
 
 Clone the repository:
 
 ```bash
-git clone https://github.com/your-username/wesfu.git
+git clone https://github.com/wesleygoyette/facetime_v5
 cd wesfu
 ```
 
