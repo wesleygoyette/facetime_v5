@@ -49,7 +49,7 @@ Available Commands:
 
 * Rust (1.72 or newer)
 * OpenCV (installed and linked on your system)
-* macOS/Linux (tested), terminal emulator
+* terminal emulator
 
 ### Build Instructions
 
@@ -68,7 +68,7 @@ A convenience script is provided in the project root:
 ./build-client-macos.sh
 ```
 
-This will build the client binary with appropriate OpenCV linkage and optimization settings for macOS.
+This will build the client binary with appropriate OpenCV linkage for macOS.
 
 #### Manual Build
 
@@ -97,7 +97,6 @@ cargo run --bin wesfu-client -- <server_ip>
 * [`tokio`](https://crates.io/crates/tokio) – Asynchronous runtime
 * [`opencv`](https://crates.io/crates/opencv) – Camera capture and image processing
 * [`crossterm`](https://crates.io/crates/crossterm) – Terminal rendering
-* [`serde`](https://crates.io/crates/serde), [`bincode`](https://crates.io/crates/bincode) – Optional serialization
 
 ## Roadmap
 
