@@ -14,12 +14,6 @@
 
 ## Architecture
 
-```
-  [Client A] ---\
-  [Client B] ----> [WeSFU Server] ---> [Client C]
-  [Client N] ---/
-```
-
 * **TCP (Control Plane):** Room creation, user registration, camera switching.
 * **UDP (Media Plane):** Frame chunking, transmission, and reconstruction.
 
@@ -83,13 +77,13 @@ cargo build --release
 ### Server
 
 ```bash
-cargo run --bin wesfu-server
+./target/release/server
 ```
 
 ### Client
 
 ```bash
-cargo run --bin wesfu-client -- <server_ip>
+./target/release/client
 ```
 
 ## Dependencies
