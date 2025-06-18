@@ -51,7 +51,7 @@ Clone the repository:
 
 ```bash
 git clone https://github.com/wesleygoyette/facetime_v5
-cd wesfu
+cd facetime_v5
 ```
 
 #### macOS Users
