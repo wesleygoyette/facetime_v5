@@ -6,8 +6,11 @@ use crossterm::{
     terminal::{Clear, ClearType},
 };
 use opencv::{
-    core::{AlgorithmHint, Mat, Size},
-    imgproc::{COLOR_BGR2GRAY, INTER_LINEAR, cvt_color, resize},
+    core::{AlgorithmHint, BORDER_DEFAULT, CV_8U, CV_32F, Mat, Size, add_weighted},
+    imgproc::{
+        COLOR_BGR2GRAY, INTER_LINEAR, canny, create_clahe, cvt_color, filter_2d, gaussian_blur,
+        resize,
+    },
     prelude::*,
 };
 use std::io::{BufWriter, Write, stdout};
@@ -40,22 +43,11 @@ impl AsciiConverter {
     }
 
     pub fn frame_to_nibbles(frame: &Mat) -> Result<Frame, Box<dyn Error + Send + Sync>> {
-        let mut gray = Mat::default();
-        if frame.channels() != 1 {
-            cvt_color(
-                frame,
-                &mut gray,
-                COLOR_BGR2GRAY,
-                0,
-                AlgorithmHint::ALGO_HINT_DEFAULT,
-            )?;
-        } else {
-            gray = frame.clone();
-        }
+        let frame = enhance_frame(frame)?;
 
         let mut resized = Mat::default();
         let size = Size::new(WIDTH, HEIGHT);
-        resize(&gray, &mut resized, size, 0.0, 0.0, INTER_LINEAR)?;
+        resize(&frame, &mut resized, size, 0.0, 0.0, INTER_LINEAR)?;
 
         let data = resized.data_bytes()?;
         let mut nibbles = Vec::with_capacity((WIDTH * HEIGHT / 2) as usize);
@@ -282,4 +274,73 @@ impl AsciiConverter {
             .flush()?;
         Ok(())
     }
+}
+
+fn enhance_frame(frame: &Mat) -> Result<Mat, Box<dyn Error + Send + Sync>> {
+    let mut gray = Mat::default();
+    if frame.channels() != 1 {
+        cvt_color(
+            frame,
+            &mut gray,
+            COLOR_BGR2GRAY,
+            0,
+            AlgorithmHint::ALGO_HINT_DEFAULT,
+        )?;
+    } else {
+        gray = frame.clone();
+    }
+
+    let mut clahe = create_clahe(1.5, Size::new(8, 8))?;
+    let mut contrast = Mat::default();
+    clahe.apply(&gray, &mut contrast)?;
+
+    let mut blurred = Mat::default();
+    gaussian_blur(
+        &contrast,
+        &mut blurred,
+        Size::new(3, 3),
+        0.0,
+        0.0,
+        BORDER_DEFAULT,
+        AlgorithmHint::ALGO_HINT_DEFAULT,
+    )?;
+
+    let kernel_data = [0.0f32, -0.5, 0.0, -0.5, 3.0, -0.5, 0.0, -0.5, 0.0];
+    let kernel = Mat::from_slice_2d(&[&kernel_data[0..3], &kernel_data[3..6], &kernel_data[6..9]])?;
+
+    let mut sharpened = Mat::default();
+    filter_2d(
+        &blurred,
+        &mut sharpened,
+        -1,
+        &kernel,
+        opencv::core::Point_::new(-1, -1),
+        0.0,
+        BORDER_DEFAULT,
+    )?;
+
+    let mut edges = Mat::default();
+    canny(&sharpened, &mut edges, 100.0, 200.0, 3, false)?;
+
+    let mut edges_f32 = Mat::default();
+    edges.convert_to(&mut edges_f32, CV_32F, 1.0 / 255.0, 0.0)?;
+
+    let mut sharpened_f32 = Mat::default();
+    sharpened.convert_to(&mut sharpened_f32, CV_32F, 1.0 / 255.0, 0.0)?;
+
+    let mut final_enhanced = Mat::default();
+    add_weighted(
+        &sharpened_f32,
+        1.0,
+        &edges_f32,
+        0.15,
+        0.0,
+        &mut final_enhanced,
+        -1,
+    )?;
+
+    let mut output = Mat::default();
+    final_enhanced.convert_to(&mut output, CV_8U, 255.0, 0.0)?;
+
+    Ok(output)
 }

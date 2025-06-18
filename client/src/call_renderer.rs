@@ -175,15 +175,50 @@ fn calculate_frame_dimensions(
 
     const CHAR_HEIGHT_TO_WIDTH_RATIO: f64 = 2.0;
 
-    let ideal_height_for_width =
-        (max_width as f64 / target_aspect_ratio / CHAR_HEIGHT_TO_WIDTH_RATIO) as u16;
-    let ideal_width_for_height =
-        (max_height as f64 * target_aspect_ratio * CHAR_HEIGHT_TO_WIDTH_RATIO) as u16;
+    // Calculate the effective aspect ratio accounting for character dimensions
+    let effective_aspect_ratio = target_aspect_ratio * CHAR_HEIGHT_TO_WIDTH_RATIO;
 
-    if ideal_height_for_width <= max_height {
-        (max_width, ideal_height_for_width)
+    // Calculate dimensions based on width constraint
+    let width_constrained_width = max_width;
+    let width_constrained_height = ((max_width as f64) / effective_aspect_ratio).round() as u16;
+
+    // Calculate dimensions based on height constraint
+    let height_constrained_height = max_height;
+    let height_constrained_width = ((max_height as f64) * effective_aspect_ratio).round() as u16;
+
+    // Choose the option that fits within both constraints
+    if width_constrained_height <= max_height && width_constrained_width <= max_width {
+        // Width-constrained solution fits
+        if height_constrained_width <= max_width && height_constrained_height <= max_height {
+            // Both fit, choose the one that gives larger area
+            let width_area = width_constrained_width as u32 * width_constrained_height as u32;
+            let height_area = height_constrained_width as u32 * height_constrained_height as u32;
+
+            if width_area >= height_area {
+                (width_constrained_width, width_constrained_height)
+            } else {
+                (height_constrained_width, height_constrained_height)
+            }
+        } else {
+            (width_constrained_width, width_constrained_height)
+        }
+    } else if height_constrained_width <= max_width && height_constrained_height <= max_height {
+        // Only height-constrained solution fits
+        (height_constrained_width, height_constrained_height)
     } else {
-        (ideal_width_for_height.min(max_width), max_height)
+        // Neither perfect solution fits, fall back to maximum possible size
+        // while maintaining aspect ratio as closely as possible
+        let container_aspect_ratio = (max_width as f64) / (max_height as f64);
+
+        if container_aspect_ratio > effective_aspect_ratio {
+            // Container is wider than target, constrain by height
+            let width = ((max_height as f64) * effective_aspect_ratio).floor() as u16;
+            (width.min(max_width), max_height)
+        } else {
+            // Container is taller than target, constrain by width
+            let height = ((max_width as f64) / effective_aspect_ratio).floor() as u16;
+            (max_width, height.min(max_height))
+        }
     }
 }
 
