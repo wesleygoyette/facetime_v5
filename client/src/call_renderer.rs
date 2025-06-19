@@ -12,213 +12,59 @@ pub async fn render_frames_to_string(
         return String::new();
     }
 
-    let target_aspect_ratio = WIDTH as f64 / HEIGHT as f64;
-
-    match frames.len() {
-        1 => {
-            render_single_frame(
-                frames[0],
-                ascii_converter,
-                width,
-                height,
-                target_aspect_ratio,
-            )
-            .await
-        }
-        2 => render_two_frames(frames, ascii_converter, width, height, target_aspect_ratio).await,
-        _ => {
-            render_multiple_frames(frames, ascii_converter, width, height, target_aspect_ratio)
-                .await
-        }
-    }
-}
-
-async fn render_single_frame(
-    frame: &Frame,
-    ascii_converter: Arc<Mutex<AsciiConverter>>,
-    width: u16,
-    height: u16,
-    target_aspect_ratio: f64,
-) -> String {
-    let (frame_width, frame_height) =
-        calculate_frame_dimensions(width, height, target_aspect_ratio);
-    let frame_str = ascii_converter
-        .lock()
-        .await
-        .nibbles_to_ascii(frame, frame_width, frame_height)
-        .to_string();
-    center_frame(&frame_str, width, height)
-}
-
-async fn render_two_frames(
-    frames: &[&Frame],
-    ascii_converter: Arc<Mutex<AsciiConverter>>,
-    width: u16,
-    height: u16,
-    target_aspect_ratio: f64,
-) -> String {
-    let vertical_spacing = 1;
-    let horizontal_spacing = 2;
-
-    let available_height_per_frame = (height.saturating_sub(vertical_spacing)) / 2;
-    let (v_width, v_height) =
-        calculate_frame_dimensions(width, available_height_per_frame, target_aspect_ratio);
-    let vertical_area = v_width as u32 * v_height as u32;
-
-    let available_width_per_frame = (width.saturating_sub(horizontal_spacing)) / 2;
-    let (h_width, h_height) =
-        calculate_frame_dimensions(available_width_per_frame, height, target_aspect_ratio);
-    let horizontal_area = h_width as u32 * h_height as u32;
-
-    let mut conv = ascii_converter.lock().await;
-
-    if vertical_area >= horizontal_area {
-        let top = conv
-            .nibbles_to_ascii(frames[0], v_width, v_height)
-            .to_string();
-        let bottom = conv
-            .nibbles_to_ascii(frames[1], v_width, v_height)
-            .to_string();
-        drop(conv);
-
-        let centered_top = center_frame(&top, width, available_height_per_frame);
-        let centered_bottom = center_frame(&bottom, width, available_height_per_frame);
-
-        format!("{}\n{}", centered_top, centered_bottom)
-    } else {
-        let left = conv
-            .nibbles_to_ascii(frames[0], h_width, h_height)
-            .to_string();
-        let right = conv
-            .nibbles_to_ascii(frames[1], h_width, h_height)
-            .to_string();
-        drop(conv);
-
-        let centered_left = center_frame(&left, available_width_per_frame, height);
-        let centered_right = center_frame(&right, available_width_per_frame, height);
-
-        combine_frames_horizontally(&centered_left, &centered_right)
-    }
-}
-
-async fn render_multiple_frames(
-    frames: &[&Frame],
-    ascii_converter: Arc<Mutex<AsciiConverter>>,
-    width: u16,
-    height: u16,
-    target_aspect_ratio: f64,
-) -> String {
+    let aspect_ratio = WIDTH as f64 / HEIGHT as f64;
     let count = frames.len();
-    let (cols, rows) = calculate_optimal_grid(count, width, height, target_aspect_ratio);
 
-    let horizontal_spacing = 2;
-    let vertical_spacing = 1;
-    let total_horizontal_spacing = horizontal_spacing * (cols - 1);
-    let total_vertical_spacing = vertical_spacing * (rows - 1);
+    let (cols, rows) = match count {
+        1 => (1, 1),
+        2 => optimal_two_frame_layout(width, height, aspect_ratio),
+        _ => calculate_optimal_grid(count, width, height, aspect_ratio),
+    };
 
-    let available_width_per_frame = (width.saturating_sub(total_horizontal_spacing)) / cols;
-    let available_height_per_frame = (height.saturating_sub(total_vertical_spacing)) / rows;
+    let spacing_x = 2;
+    let spacing_y = 1;
 
-    let (frame_width, frame_height) = calculate_frame_dimensions(
-        available_width_per_frame,
-        available_height_per_frame,
-        target_aspect_ratio,
-    );
+    let total_spacing_x = spacing_x * (cols - 1);
+    let total_spacing_y = spacing_y * (rows - 1);
 
-    let estimated_capacity = (frame_width as usize * frame_height as usize * count) + (count * 100);
+    let cell_width = width.saturating_sub(total_spacing_x as u16) / cols as u16;
+    let cell_height = height.saturating_sub(total_spacing_y as u16) / rows as u16;
+
+    let (frame_width, frame_height) =
+        calculate_frame_dimensions(cell_width, cell_height, aspect_ratio);
+
     let mut ascii_frames = Vec::with_capacity(count);
-
     {
-        let mut conv = ascii_converter.lock().await;
+        let mut converter = ascii_converter.lock().await;
         for &frame in frames {
-            let frame_str = conv
+            let raw = converter
                 .nibbles_to_ascii(frame, frame_width, frame_height)
                 .to_string();
-            let centered_frame = center_frame(
-                &frame_str,
-                available_width_per_frame,
-                available_height_per_frame,
-            );
-            ascii_frames.push(centered_frame);
+            let centered = center_in_cell(&raw, cell_width, cell_height);
+            ascii_frames.push(centered);
         }
     }
 
-    let mut result = String::with_capacity(estimated_capacity);
-    for row in 0..rows {
-        if row > 0 {
-            result.push('\n');
-        }
-
-        let start_idx = (row * cols) as usize;
-        let end_idx = ((row + 1) * cols).min(count as u16) as usize;
-        let row_frames = &ascii_frames[start_idx..end_idx];
-
-        if row_frames.len() == 1 {
-            result.push_str(&row_frames[0]);
-        } else {
-            combine_frames_in_row(&mut result, row_frames);
-        }
-    }
-
-    result
+    combine_into_grid(&ascii_frames, cols, spacing_x, spacing_y)
 }
 
-#[inline]
-fn calculate_frame_dimensions(
-    max_width: u16,
-    max_height: u16,
-    target_aspect_ratio: f64,
-) -> (u16, u16) {
-    if max_width == 0 || max_height == 0 {
-        return (0, 0);
-    }
+fn optimal_two_frame_layout(width: u16, height: u16, aspect_ratio: f64) -> (usize, usize) {
+    let spacing_x = 2;
+    let spacing_y = 1;
 
-    const CHAR_HEIGHT_TO_WIDTH_RATIO: f64 = 2.0;
+    let half_height = (height - spacing_y) / 2;
+    let half_width = (width - spacing_x) / 2;
 
-    // Calculate the effective aspect ratio accounting for character dimensions
-    let effective_aspect_ratio = target_aspect_ratio * CHAR_HEIGHT_TO_WIDTH_RATIO;
+    let (vw, vh) = calculate_frame_dimensions(width, half_height, aspect_ratio);
+    let (hw, hh) = calculate_frame_dimensions(half_width, height, aspect_ratio);
 
-    // Calculate dimensions based on width constraint
-    let width_constrained_width = max_width;
-    let width_constrained_height = ((max_width as f64) / effective_aspect_ratio).round() as u16;
+    let vertical_area = vw as usize * vh as usize;
+    let horizontal_area = hw as usize * hh as usize;
 
-    // Calculate dimensions based on height constraint
-    let height_constrained_height = max_height;
-    let height_constrained_width = ((max_height as f64) * effective_aspect_ratio).round() as u16;
-
-    // Choose the option that fits within both constraints
-    if width_constrained_height <= max_height && width_constrained_width <= max_width {
-        // Width-constrained solution fits
-        if height_constrained_width <= max_width && height_constrained_height <= max_height {
-            // Both fit, choose the one that gives larger area
-            let width_area = width_constrained_width as u32 * width_constrained_height as u32;
-            let height_area = height_constrained_width as u32 * height_constrained_height as u32;
-
-            if width_area >= height_area {
-                (width_constrained_width, width_constrained_height)
-            } else {
-                (height_constrained_width, height_constrained_height)
-            }
-        } else {
-            (width_constrained_width, width_constrained_height)
-        }
-    } else if height_constrained_width <= max_width && height_constrained_height <= max_height {
-        // Only height-constrained solution fits
-        (height_constrained_width, height_constrained_height)
+    if vertical_area >= horizontal_area {
+        (1, 2)
     } else {
-        // Neither perfect solution fits, fall back to maximum possible size
-        // while maintaining aspect ratio as closely as possible
-        let container_aspect_ratio = (max_width as f64) / (max_height as f64);
-
-        if container_aspect_ratio > effective_aspect_ratio {
-            // Container is wider than target, constrain by height
-            let width = ((max_height as f64) * effective_aspect_ratio).floor() as u16;
-            (width.min(max_width), max_height)
-        } else {
-            // Container is taller than target, constrain by width
-            let height = ((max_width as f64) / effective_aspect_ratio).floor() as u16;
-            (max_width, height.min(max_height))
-        }
+        (2, 1)
     }
 }
 
@@ -226,161 +72,111 @@ fn calculate_optimal_grid(
     count: usize,
     width: u16,
     height: u16,
-    target_aspect_ratio: f64,
-) -> (u16, u16) {
-    if count <= 2 {
-        return (count as u16, 1);
-    }
-
-    let mut best_area = 0u32;
-    let mut best_layout = (1, count as u16);
+    aspect_ratio: f64,
+) -> (usize, usize) {
+    let mut best = (1, count);
+    let mut best_area = 0;
 
     for cols in 1..=count {
         let rows = (count + cols - 1) / cols;
-        let horizontal_spacing = 2 * (cols - 1);
-        let vertical_spacing = rows - 1;
+        let spacing_x = 2 * (cols - 1);
+        let spacing_y = rows - 1;
 
-        let available_width_per_frame =
-            width.saturating_sub(horizontal_spacing as u16) / cols as u16;
-        let available_height_per_frame =
-            height.saturating_sub(vertical_spacing as u16) / rows as u16;
+        let w = width.saturating_sub(spacing_x as u16) / cols as u16;
+        let h = height.saturating_sub(spacing_y as u16) / rows as u16;
 
-        if available_width_per_frame == 0 || available_height_per_frame == 0 {
+        if w == 0 || h == 0 {
             continue;
         }
 
-        let (frame_width, frame_height) = calculate_frame_dimensions(
-            available_width_per_frame,
-            available_height_per_frame,
-            target_aspect_ratio,
-        );
+        let (fw, fh) = calculate_frame_dimensions(w, h, aspect_ratio);
+        let area = fw as usize * fh as usize;
 
-        let area = frame_width as u32 * frame_height as u32;
         if area > best_area {
             best_area = area;
-            best_layout = (cols as u16, rows as u16);
+            best = (cols, rows);
         }
     }
 
-    best_layout
+    best
 }
 
-fn center_frame(frame: &str, container_width: u16, container_height: u16) -> String {
+fn calculate_frame_dimensions(max_width: u16, max_height: u16, aspect_ratio: f64) -> (u16, u16) {
+    const CHAR_RATIO: f64 = 2.0;
+    let eff_ratio = aspect_ratio * CHAR_RATIO;
+
+    let h_by_w = (max_width as f64 / eff_ratio).round() as u16;
+    let w_by_h = (max_height as f64 * eff_ratio).round() as u16;
+
+    match (h_by_w <= max_height, w_by_h <= max_width) {
+        (true, false) => (max_width, h_by_w),
+        (false, true) => (w_by_h, max_height),
+        (true, true) => {
+            let a1 = max_width as usize * h_by_w as usize;
+            let a2 = w_by_h as usize * max_height as usize;
+            if a1 >= a2 {
+                (max_width, h_by_w)
+            } else {
+                (w_by_h, max_height)
+            }
+        }
+        _ => (max_width.min(w_by_h), max_height.min(h_by_w)),
+    }
+}
+
+fn center_in_cell(frame: &str, cell_w: u16, cell_h: u16) -> String {
     let lines: Vec<&str> = frame.lines().collect();
-    if lines.is_empty() {
-        return " ".repeat(container_width as usize * container_height as usize);
+    let frame_h = lines.len();
+
+    let pad_top = (cell_h as usize).saturating_sub(frame_h) / 2;
+    let pad_bottom = cell_h as usize - pad_top - frame_h;
+
+    let mut result = Vec::with_capacity(cell_h as usize);
+
+    for _ in 0..pad_top {
+        result.push(" ".repeat(cell_w as usize));
     }
 
-    let frame_height = lines.len();
+    for &line in &lines {
+        let len = line.chars().count();
+        let pad_left = (cell_w as usize).saturating_sub(len) / 2;
+        let pad_right = cell_w as usize - pad_left - len;
 
-    let container_width = container_width as usize;
-    let container_height = container_height as usize;
-
-    let vertical_padding = container_height.saturating_sub(frame_height) / 2;
-
-    let estimated_capacity = container_width * container_height + container_height;
-    let mut result = String::with_capacity(estimated_capacity);
-
-    for i in 0..vertical_padding {
-        if i > 0 {
-            result.push('\n');
-        }
-        result.extend(std::iter::repeat(' ').take(container_width));
+        let padded = format!("{}{}{}", " ".repeat(pad_left), line, " ".repeat(pad_right));
+        result.push(padded);
     }
 
-    for line in lines.iter() {
-        if !result.is_empty() {
-            result.push('\n');
-        }
-
-        let line_width = line.chars().count();
-        let horizontal_padding = container_width.saturating_sub(line_width) / 2;
-        let remaining_width = container_width.saturating_sub(horizontal_padding + line_width);
-
-        result.extend(std::iter::repeat(' ').take(horizontal_padding));
-        result.push_str(line);
-        result.extend(std::iter::repeat(' ').take(remaining_width));
-    }
-    let remaining_lines = container_height.saturating_sub(vertical_padding + frame_height);
-    for _ in 0..remaining_lines {
-        result.push('\n');
-        result.extend(std::iter::repeat(' ').take(container_width));
+    for _ in 0..pad_bottom {
+        result.push(" ".repeat(cell_w as usize));
     }
 
-    result
+    result.join("\n")
 }
 
-#[inline]
-fn combine_frames_horizontally(frame1: &str, frame2: &str) -> String {
-    let frames = [frame1, frame2];
-    combine_frames_in_row_slice(&frames)
-}
+fn combine_into_grid(frames: &[String], cols: usize, spacing_x: usize, spacing_y: usize) -> String {
+    let mut lines = Vec::new();
 
-fn combine_frames_in_row(result: &mut String, frames: &[String]) {
-    if frames.is_empty() {
-        return;
-    }
-    if frames.len() == 1 {
-        result.push_str(&frames[0]);
-        return;
-    }
+    for chunk in frames.chunks(cols) {
+        let row_lines: Vec<Vec<&str>> = chunk.iter().map(|f| f.lines().collect()).collect();
+        let line_count = row_lines[0].len();
 
-    let frame_lines: Vec<Vec<&str>> = frames.iter().map(|f| f.lines().collect()).collect();
-    let max_lines = frame_lines
-        .iter()
-        .map(|lines| lines.len())
-        .max()
-        .unwrap_or(0);
-
-    for line_idx in 0..max_lines {
-        if line_idx > 0 {
-            result.push('\n');
+        for i in 0..line_count {
+            let mut line = String::new();
+            for (j, frame) in row_lines.iter().enumerate() {
+                if j > 0 {
+                    line.push_str(&" ".repeat(spacing_x));
+                }
+                line.push_str(frame.get(i).copied().unwrap_or(""));
+            }
+            lines.push(line);
         }
 
-        for (frame_idx, lines) in frame_lines.iter().enumerate() {
-            if frame_idx > 0 {
-                result.push_str("  ");
-            }
-            if let Some(line) = lines.get(line_idx) {
-                result.push_str(line);
-            }
-        }
-    }
-}
-
-fn combine_frames_in_row_slice(frames: &[&str]) -> String {
-    if frames.is_empty() {
-        return String::new();
-    }
-    if frames.len() == 1 {
-        return frames[0].to_string();
-    }
-
-    let frame_lines: Vec<Vec<&str>> = frames.iter().map(|f| f.lines().collect()).collect();
-    let max_lines = frame_lines
-        .iter()
-        .map(|lines| lines.len())
-        .max()
-        .unwrap_or(0);
-
-    let estimated_capacity =
-        frames.iter().map(|f| f.len()).sum::<usize>() + max_lines * frames.len() * 2;
-    let mut result = String::with_capacity(estimated_capacity);
-
-    for line_idx in 0..max_lines {
-        if line_idx > 0 {
-            result.push('\n');
-        }
-
-        for (frame_idx, lines) in frame_lines.iter().enumerate() {
-            if frame_idx > 0 {
-                result.push_str("  ");
-            }
-            if let Some(line) = lines.get(line_idx) {
-                result.push_str(line);
+        if spacing_y > 0 && chunk.len() == cols {
+            for _ in 0..spacing_y {
+                lines.push("".to_string());
             }
         }
     }
 
-    result
+    lines.join("\n")
 }
