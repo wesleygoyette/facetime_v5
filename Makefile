@@ -8,7 +8,7 @@ all: build
 
 # Build the Docker image
 build:
-	docker build -t $(IMAGE_NAME) .
+	docker build -t $(IMAGE_NAME) -f docker/Dockerfile.aws .
 
 # Run the container in detached mode with a name
 up:
