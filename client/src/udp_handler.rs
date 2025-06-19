@@ -16,16 +16,16 @@ use tokio_util::sync::CancellationToken;
 use crate::ascii_converter::Frame;
 
 const CHUNK_SIZE: usize = 1200;
-const CHUNK_TIMEOUT: Duration = Duration::from_millis(50); // Increased timeout
-const DELTA_THRESHOLD: f32 = 0.3; // 30% threshold as ratio
-const MIN_BLOCK_SIZE: usize = 64; // Smaller minimum block size
-const SEQUENCE_WRAP: u32 = 1000000; // Sequence number wraparound
+const CHUNK_TIMEOUT: Duration = Duration::from_millis(50);
+const DELTA_THRESHOLD: f32 = 0.3;
+const MIN_BLOCK_SIZE: usize = 64;
+const SEQUENCE_WRAP: u32 = 1000000;
 
 #[derive(Clone, Debug, PartialEq)]
 enum FrameType {
     Full = 0,
     Delta = 1,
-    Heartbeat = 2, // For keep-alive when no changes
+    Heartbeat = 2,
 }
 
 #[derive(Clone)]
@@ -46,7 +46,7 @@ struct FrameCache {
     last_frame: Option<Frame>,
     reconstructed_frame: Option<Frame>,
     last_sequence: u32,
-    corrupted: bool, // Track if we need a full frame refresh
+    corrupted: bool,
 }
 
 impl FrameCache {
@@ -71,7 +71,6 @@ impl FrameCache {
     }
 }
 
-// Improved delta compression using run-length encoding approach
 fn create_delta_optimized(old_frame: &[u8], new_frame: &[u8]) -> Option<Vec<DeltaChunk>> {
     if old_frame.len() != new_frame.len() {
         return None;
@@ -82,7 +81,6 @@ fn create_delta_optimized(old_frame: &[u8], new_frame: &[u8]) -> Option<Vec<Delt
     let len = new_frame.len();
 
     while i < len {
-        // Skip identical bytes
         while i < len && old_frame[i] == new_frame[i] {
             i += 1;
         }
@@ -91,13 +89,11 @@ fn create_delta_optimized(old_frame: &[u8], new_frame: &[u8]) -> Option<Vec<Delt
             break;
         }
 
-        // Found a difference, find the end of the changed region
         let start = i;
         while i < len && old_frame[i] != new_frame[i] {
             i += 1;
         }
 
-        // Look ahead a bit to avoid tiny fragments
         let lookahead = std::cmp::min(MIN_BLOCK_SIZE, len - i);
         let mut identical_count = 0;
 
@@ -108,10 +104,8 @@ fn create_delta_optimized(old_frame: &[u8], new_frame: &[u8]) -> Option<Vec<Delt
             identical_count += 1;
         }
 
-        // If we have a small gap of identical bytes, include them in the delta
         if identical_count < MIN_BLOCK_SIZE / 4 {
             i += identical_count;
-            // Continue to include more changes
             while i < len && old_frame[i] != new_frame[i] {
                 i += 1;
             }
@@ -127,8 +121,7 @@ fn create_delta_optimized(old_frame: &[u8], new_frame: &[u8]) -> Option<Vec<Delt
         return Some(Vec::new());
     }
 
-    // Check if delta is efficient enough
-    let delta_size: usize = deltas.iter().map(|d| d.data.len() + 8).sum(); // +8 for offset+length
+    let delta_size: usize = deltas.iter().map(|d| d.data.len() + 8).sum();
     let threshold_size = (new_frame.len() as f32 * DELTA_THRESHOLD) as usize;
 
     if delta_size >= threshold_size {
@@ -138,7 +131,6 @@ fn create_delta_optimized(old_frame: &[u8], new_frame: &[u8]) -> Option<Vec<Delt
     Some(deltas)
 }
 
-// Pre-allocate buffer for better performance
 fn serialize_deltas_optimized(deltas: &[DeltaChunk]) -> Vec<u8> {
     let capacity = 4 + deltas.iter().map(|d| 8 + d.data.len()).sum::<usize>();
     let mut result = Vec::with_capacity(capacity);
@@ -193,7 +185,6 @@ fn apply_delta_safe(
     base_frame: &mut [u8],
     deltas: &[DeltaChunk],
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    // Validate all deltas before applying any
     for delta in deltas {
         let start = delta.offset as usize;
         let end = start + delta.data.len();
@@ -208,7 +199,6 @@ fn apply_delta_safe(
         }
     }
 
-    // Apply all deltas
     for delta in deltas {
         let start = delta.offset as usize;
         let end = start + delta.data.len();
@@ -232,7 +222,7 @@ pub async fn udp_listener_loop(
             result = udp_stream.recv(&mut buf) => {
                 if let Ok(n) = result {
                     let sid_len = StreamID::default().len();
-                    if n > sid_len + 10 { // +1 frame_type, +4 sequence, +4 chunk_id, +1 is_last
+                    if n > sid_len + 10 {
                         if let Ok(sid) = StreamID::try_from(&buf[..sid_len]) {
                             let frame_type = match buf[sid_len] {
                                 0 => FrameType::Full,
@@ -246,9 +236,8 @@ pub async fn udp_listener_loop(
                             let is_last = buf[sid_len + 9] == 1;
                             let chunk_data = &buf[sid_len + 10..n];
 
-                            // Handle heartbeat frames
                             if frame_type == FrameType::Heartbeat {
-                                continue; // Just keep the connection alive
+                                continue;
                             }
 
                             let entry = fragment_buffers.entry(sid.clone()).or_insert(FragmentBuffer {
@@ -259,9 +248,7 @@ pub async fn udp_listener_loop(
                                 sequence,
                             });
 
-                            // Check sequence number for lost packets
                             if entry.sequence != sequence {
-                                // New frame started, clear old fragments
                                 entry.chunks.clear();
                                 entry.frame_type = frame_type;
                                 entry.sequence = sequence;
@@ -274,7 +261,6 @@ pub async fn udp_listener_loop(
                                 entry.expected_chunks = chunk_id + 1;
 
                                 if entry.chunks.len() == entry.expected_chunks as usize {
-                                    // Reassemble frame data
                                     let mut frame_data = Vec::new();
                                     for chunk in entry.chunks.values() {
                                         frame_data.extend(chunk);
@@ -289,7 +275,6 @@ pub async fn udp_listener_loop(
                                         },
                                         FrameType::Delta => {
                                             if cache.corrupted {
-                                                // Skip delta, wait for full frame
                                                 None
                                             } else if let Some(ref mut base_frame) = cache.reconstructed_frame {
                                                 match deserialize_deltas(&frame_data) {
@@ -333,7 +318,6 @@ pub async fn udp_listener_loop(
                     }
                 }
 
-                // Cleanup expired buffers and mark caches as corrupted
                 fragment_buffers.retain(|sid, fb| {
                     let expired = fb.last_update.elapsed() >= CHUNK_TIMEOUT;
                     if expired {
@@ -361,7 +345,7 @@ pub async fn udp_send_loop(
     let mut last_frame: Option<Frame> = None;
     let mut sequence: u32 = 0;
     let mut heartbeat_counter = 0;
-    const HEARTBEAT_INTERVAL: u32 = 30; // Send heartbeat every 30 unchanged frames
+    const HEARTBEAT_INTERVAL: u32 = 30;
 
     loop {
         tokio::select! {
@@ -378,7 +362,7 @@ pub async fn udp_send_loop(
                                 heartbeat_counter = 0;
                                 (FrameType::Heartbeat, Vec::new())
                             } else {
-                                continue; // Skip unchanged frame
+                                continue;
                             }
                         } else {
                             heartbeat_counter = 0;
@@ -396,17 +380,15 @@ pub async fn udp_send_loop(
                 last_frame = Some(frame);
 
                 if frame_type == FrameType::Heartbeat {
-                    // Send single heartbeat packet
                     let mut packet = full_sid.clone();
                     packet.push(FrameType::Heartbeat as u8);
                     packet.extend_from_slice(&sequence.to_be_bytes());
-                    packet.extend_from_slice(&0u32.to_be_bytes()); // chunk_id = 0
-                    packet.push(1); // is_last = true
+                    packet.extend_from_slice(&0u32.to_be_bytes());
+                    packet.push(1);
                     let _ = udp_stream.send(&packet).await;
                     continue;
                 }
 
-                // Send fragmented data
                 let chunks: Vec<_> = data_to_send.chunks(CHUNK_SIZE).collect();
                 let total_chunks = chunks.len();
 
