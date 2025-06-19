@@ -38,10 +38,18 @@ jobs:
         run: |
           docker build -f docker/Dockerfile.aws -t wesfu-server:latest .
 
+      - name: Create Custom Docker Network with MTU 9001
+        run: |
+          docker network create \
+            --driver=bridge \
+            --opt com.docker.network.driver.mtu=9001 \
+            wesfu-net
+
       - name: Run New Container
         run: |
           docker run -d \
             --name wesfu-server \
+            --network wesfu-net \
             -p 8040:8040 \
             -p 8039:8039/udp \
             wesfu-server:latest
