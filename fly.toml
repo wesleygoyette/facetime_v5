@@ -7,26 +7,26 @@ app = 'facetime-v5'
 primary_region = 'den'
 
 [build]
-  dockerfile = 'Dockerfile'
+dockerfile = 'docker/Dockerfile.fly'
 
 [deploy]
-  strategy = 'rolling'
+strategy = 'rolling'
 
 [[services]]
-  protocol = 'udp'
-  internal_port = 8039
+protocol = 'udp'
+internal_port = 8039
 
-  [[services.ports]]
-    port = 8039
+[[services.ports]]
+port = 8039
 
 [[services]]
-  protocol = 'tcp'
-  internal_port = 8040
+protocol = 'tcp'
+internal_port = 8040
 
-  [[services.ports]]
-    port = 8040
+[[services.ports]]
+port = 8040
 
 [[vm]]
-  memory = '1gb'
-  cpu_kind = 'shared'
-  cpus = 1
+memory = '1gb'
+cpu_kind = 'shared'
+cpus = 1
