@@ -88,7 +88,6 @@ impl UdpHandler {
         let socket = Arc::new(socket);
         self.socket = Some(Arc::clone(&socket));
 
-        // Spawn background tasks
         let cleanup_task = self.spawn_cleanup_task();
         let batch_flush_task = self.spawn_batch_flush_task(Arc::clone(&socket));
 
@@ -168,7 +167,6 @@ impl UdpHandler {
         sid_len: usize,
         min_packet_size: usize,
     ) {
-        // Update stats
         {
             let mut stats = self.stats.lock().await;
             stats.packets_received += 1;
@@ -178,14 +176,12 @@ impl UdpHandler {
             return;
         }
 
-        // Rate limiting check
         if !self.check_rate_limit(from_addr).await {
             let mut stats = self.stats.lock().await;
             stats.packets_dropped += 1;
             return;
         }
 
-        // Parse packet
         let rid: RoomID = match buf[..rid_len].try_into() {
             Ok(rid) => rid,
             Err(_) => return,
@@ -198,13 +194,11 @@ impl UdpHandler {
 
         to_addrs.clear();
 
-        // Fast path: read-only access first
         let needs_update = {
             let room_map_read = room_map.read().await;
             if let Some(room) = room_map_read.get(&rid) {
                 let stream_map = room.stream_id_to_socket_addr.lock().await;
 
-                // Collect destinations
                 for (to_sid, to_addr_option) in stream_map.iter() {
                     if to_sid != &sid {
                         if let Some(to_addr) = to_addr_option {
@@ -213,14 +207,12 @@ impl UdpHandler {
                     }
                 }
 
-                // Check if we need to update this stream's address
                 stream_map.get(&sid).map_or(true, |entry| entry.is_none())
             } else {
-                return; // Room doesn't exist
+                return;
             }
         };
 
-        // Update stream address if needed (slow path)
         if needs_update {
             let mut room_map_write = room_map.write().await;
             if let Some(room) = room_map_write.get_mut(&rid) {
@@ -237,10 +229,8 @@ impl UdpHandler {
             return;
         }
 
-        // Create payload without room ID (clients don't need it)
         let payload = [&buf[rid_len..rid_len + sid_len], &buf[rid_len + sid_len..]].concat();
 
-        // Check backpressure
         {
             let batch = self.packet_batch.lock().await;
             if batch.packets.len() >= BACKPRESSURE_THRESHOLD {
@@ -250,12 +240,9 @@ impl UdpHandler {
             }
         }
 
-        // Add to batch or send immediately for small groups
         if to_addrs.len() <= 3 {
-            // Send immediately for small groups to reduce latency
             self.send_immediate(socket, &payload, to_addrs).await;
         } else {
-            // Add to batch for larger groups
             let mut batch = self.packet_batch.lock().await;
             batch.add_packet(payload, to_addrs.clone());
 
@@ -309,7 +296,6 @@ impl UdpHandler {
             packets
         };
 
-        // Group by destination to minimize syscalls
         let mut by_destination: HashMap<SocketAddr, Vec<Vec<u8>>> = HashMap::new();
 
         for (payload, destinations) in packets_to_send {
@@ -321,7 +307,6 @@ impl UdpHandler {
             }
         }
 
-        // Send all packets
         let mut forwarded = 0;
         let mut dropped = 0;
 
@@ -332,7 +317,6 @@ impl UdpHandler {
                     Err(e) => {
                         dropped += 1;
                         if dropped % 100 == 0 {
-                            // Log every 100th error to avoid spam
                             log::warn!("Failed to send to {}: {}", dest, e);
                         }
                     }
@@ -340,7 +324,6 @@ impl UdpHandler {
             }
         }
 
-        // Update stats
         if forwarded > 0 || dropped > 0 {
             let mut stats = self.stats.lock().await;
             stats.packets_forwarded += forwarded;
@@ -358,7 +341,6 @@ impl UdpHandler {
             rate_window_start: now,
         });
 
-        // Reset counter if window expired
         if client.rate_window_start.elapsed() >= RATE_LIMIT_WINDOW {
             client.packet_count = 0;
             client.rate_window_start = now;
@@ -382,9 +364,7 @@ impl UdpHandler {
                 let mut clients = client_stats.lock().await;
                 let before_count = clients.len();
 
-                clients.retain(|_, stats| {
-                    stats.last_seen.elapsed() < Duration::from_secs(300) // 5 minutes
-                });
+                clients.retain(|_, stats| stats.last_seen.elapsed() < Duration::from_secs(300));
 
                 let removed = before_count - clients.len();
                 if removed > 0 {
@@ -409,12 +389,10 @@ impl UdpHandler {
                     continue;
                 }
 
-                // Process batch
                 let packets_to_send = std::mem::take(&mut batch.packets);
                 batch.clear();
                 drop(batch);
 
-                // Group by destination to minimize syscalls
                 let mut by_destination: HashMap<SocketAddr, Vec<Vec<u8>>> = HashMap::new();
 
                 for (payload, destinations) in packets_to_send {
@@ -426,7 +404,6 @@ impl UdpHandler {
                     }
                 }
 
-                // Send all packets
                 let mut forwarded = 0;
                 let mut dropped = 0;
 
@@ -437,7 +414,6 @@ impl UdpHandler {
                             Err(e) => {
                                 dropped += 1;
                                 if dropped % 100 == 0 {
-                                    // Log every 100th error to avoid spam
                                     log::warn!("Failed to send to {}: {}", dest, e);
                                 }
                             }
@@ -445,7 +421,6 @@ impl UdpHandler {
                     }
                 }
 
-                // Update stats
                 if forwarded > 0 || dropped > 0 {
                     let mut stats_guard = stats.lock().await;
                     stats_guard.packets_forwarded += forwarded;
