@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::ascii_converter::Frame;
 
-const CHUNK_SIZE: usize = 1200;
+const CHUNK_SIZE: usize = 1350;
 const CHUNK_TIMEOUT: Duration = Duration::from_millis(50);
 const DELTA_THRESHOLD: f32 = 0.3;
 const MIN_BLOCK_SIZE: usize = 64;
