@@ -30,6 +30,7 @@ pub struct Camera {
     capture: CameraCapture,
     frame: Mat,
     start_time: Instant,
+    last_frame_time: Instant,
 }
 
 enum CameraCapture {
@@ -48,6 +49,7 @@ impl Camera {
                     capture: CameraCapture::Test(mode),
                     frame,
                     start_time,
+                    last_frame_time: Instant::now(),
                 });
             }
         }
@@ -61,10 +63,21 @@ impl Camera {
             capture: CameraCapture::Real(cam),
             frame,
             start_time,
+            last_frame_time: Instant::now(),
         })
     }
 
     pub async fn get_frame(&mut self) -> Result<&Mat, Box<dyn Error + Send + Sync>> {
+        let target_frame_duration = std::time::Duration::from_millis(33); // ~30 FPS
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_frame_time);
+
+        if elapsed < target_frame_duration {
+            tokio::time::sleep(target_frame_duration - elapsed).await;
+        }
+
+        self.last_frame_time = Instant::now();
+
         match &mut self.capture {
             CameraCapture::Real(video_capture) => {
                 video_capture.read(&mut self.frame)?;
