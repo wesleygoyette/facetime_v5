@@ -104,7 +104,9 @@ Feel free to reach out anytime:
 
 ## License
 
-This project is licensed under a custom proprietary license.  
-See the [LICENSE](./LICENSE) file for terms of use.
+This project is licensed under the **GNU General Public License v3.0**.
+You may copy, distribute, and modify the software under the terms of the [GPLv3](https://www.gnu.org/licenses/gpl-3.0.html).
 
-© Wesley Goyette 2025. All rights reserved.
+See the [LICENSE](./LICENSE) file for the full license text.
+
+© Wesley Goyette 2025.
