@@ -1,4 +1,4 @@
-# WeSFU ![Rust](https://img.shields.io/badge/language-Rust-orange)
+# WeSFU ![Rust](https://img.shields.io/badge/language-Rust-orange) ![OpenCV](https://img.shields.io/badge/OpenCV-0.94.4-blue) ![Tokio](https://img.shields.io/badge/tokio-1.45.1-blueviolet) ![Crossterm](https://img.shields.io/badge/crossterm-0.29.0-yellow)
 
 **WeSFU** (Wesley's Selective Forwarding Unit) is a command-line-based, real-time video conferencing application written in Rust. It implements a Selective Forwarding Unit (SFU) server that manages connections via TCP and forwards video streams over UDP. Designed for low-latency performance, WeSFU uses `tokio` for asynchronous networking and `opencv` for camera capture and frame processing.
 
