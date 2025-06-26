@@ -106,6 +106,10 @@ Feel free to reach out anytime:
 **Email:**
 [wesley.goyette@gmail.com](mailto:wesley.goyette@gmail.com)
 
+## User Feedback
+
+![Feedback](https://github.com/wesleygoyette/wesfu_assets/blob/master/user-feedback.png?raw=true)
+
 ## License
 
 This project is licensed under the **GNU General Public License v3.0**.
