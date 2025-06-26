@@ -1,12 +1,11 @@
-mod ascii_converter;
 mod call_interface;
-mod call_renderer;
 mod camera;
 mod cli_display;
 mod client;
+mod frame;
 mod frame_generator;
 mod pre_call_interface;
-mod raw_mode_guard;
+mod renderer;
 mod udp_handler;
 
 use clap::Parser;
@@ -24,13 +23,21 @@ struct Args {
 
     #[arg(short, long, default_value = "0")]
     camera: String,
+
+    #[arg(long, default_value_t = false)]
+    color: bool,
 }
 
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
 
-    let camera_index = match args.camera.parse() {
+    let username = match args.username {
+        Some(username) => username,
+        None => generate_username(),
+    };
+
+    let mut camera_index = match args.camera.parse() {
         Ok(idx) => idx,
         _ => {
             eprintln!("Invalid camera");
@@ -43,12 +50,14 @@ async fn main() {
         return;
     }
 
-    let username = match args.username {
-        Some(username) => username,
-        None => generate_username(),
-    };
-
-    if let Err(e) = Client::run(&args.server_address, &username, camera_index).await {
+    if let Err(e) = Client::run(
+        &args.server_address,
+        &username,
+        &mut camera_index,
+        args.color,
+    )
+    .await
+    {
         eprintln!("{}", e);
     }
 }

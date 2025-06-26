@@ -1,6 +1,7 @@
 use opencv::{
     core::{
-        CV_8UC1, LogLevel, Mat, MatExprTraitConst, MatTraitConst, get_log_level, set_log_level,
+        CV_8UC1, LogLevel, Mat, MatExprTraitConst, MatTraitConst, flip, get_log_level,
+        set_log_level,
     },
     videoio::{CAP_ANY, VideoCapture, VideoCaptureTrait, VideoCaptureTraitConst},
 };
@@ -13,6 +14,9 @@ use tokio::time::Instant;
 
 pub const MAX_USER_CAMERAS: i32 = 10;
 
+pub const TEST_FRAME_WIDTH: i32 = 96;
+pub const TEST_FRAME_HEIGHT: i32 = 54;
+
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 
@@ -21,10 +25,7 @@ use libc::{STDERR_FILENO, dup2};
 #[cfg(unix)]
 use std::io::stderr;
 
-use crate::{
-    ascii_converter::{HEIGHT, WIDTH},
-    frame_generator::{CameraTestMode, FrameGenerator},
-};
+use crate::frame_generator::{CameraTestMode, FrameGenerator};
 
 pub struct Camera {
     capture: CameraCapture,
@@ -68,7 +69,7 @@ impl Camera {
     }
 
     pub async fn get_frame(&mut self) -> Result<&Mat, Box<dyn Error + Send + Sync>> {
-        let target_frame_duration = std::time::Duration::from_millis(33); // ~30 FPS
+        let target_frame_duration = std::time::Duration::from_millis(33);
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_frame_time);
 
@@ -80,16 +81,23 @@ impl Camera {
 
         match &mut self.capture {
             CameraCapture::Real(video_capture) => {
-                video_capture.read(&mut self.frame)?;
+                let mut flipped = Mat::default();
+                video_capture.read(&mut flipped)?;
 
-                if self.frame.empty() {
+                if flipped.empty() {
                     return Err("Empty frame captured".into());
+                }
+
+                if let Err(e) = flip(&flipped, &mut self.frame, 1) {
+                    eprintln!("Flip failed, using original frame: {}", e);
+                    self.frame = flipped;
                 }
 
                 Ok(&self.frame)
             }
             CameraCapture::Test(mode) => {
-                let mut output = Mat::zeros(HEIGHT, WIDTH, CV_8UC1)?.to_mat()?;
+                let mut output =
+                    Mat::zeros(TEST_FRAME_HEIGHT, TEST_FRAME_WIDTH, CV_8UC1)?.to_mat()?;
                 let time = self.start_time.elapsed().as_millis() as i32 / 70;
 
                 FrameGenerator::generate_frame(mode, time, &mut output)?;

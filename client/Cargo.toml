@@ -7,16 +7,18 @@ edition = "2024"
 name = "client"
 
 [dependencies]
+shared = { path = "../shared" }
 tokio = { version = "1.45.1", features = ["full"] }
 tokio-util = "0.7.15"
-shared = { path = "../shared" }
 clap = { version = "4.5.38", features = ["derive"] }
 rand = "0.9.1"
 crossterm = "0.29.0"
-opencv = "0.94.4"
+opencv = "0.95.0"
 futures = "0.3.31"
-colored = "3.0.0"
 chrono = "0.4.41"
 libc = "0.2.173"
 strum = "0.27.1"
 strum_macros = "0.27.1"
+ctrlc = "3.4.7"
+scopeguard = "1.2.0"
+libwebp-sys = "0.12.1"

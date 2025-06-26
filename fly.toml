@@ -7,7 +7,7 @@ app = 'facetime-v5'
 primary_region = 'den'
 
 [build]
-dockerfile = 'docker/Dockerfile.fly'
+dockerfile = 'Dockerfile'
 
 [deploy]
 strategy = 'rolling'

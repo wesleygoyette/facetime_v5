@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     sync::Arc,
     time::Duration,
 };
@@ -13,13 +13,14 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::ascii_converter::Frame;
+use crate::frame::Frame;
 
 const CHUNK_SIZE: usize = 1350;
 const CHUNK_TIMEOUT: Duration = Duration::from_millis(50);
 const DELTA_THRESHOLD: f32 = 0.3;
 const MIN_BLOCK_SIZE: usize = 64;
 const SEQUENCE_WRAP: u32 = 1000000;
+const BUFFER_POOL_SIZE: usize = 10;
 
 #[derive(Clone, Debug, PartialEq)]
 enum FrameType {
@@ -43,10 +44,37 @@ struct FragmentBuffer {
 }
 
 struct FrameCache {
-    last_frame: Option<Frame>,
-    reconstructed_frame: Option<Frame>,
+    last_frame: Option<Vec<u8>>,
+    reconstructed_frame: Option<Vec<u8>>,
     last_sequence: u32,
     corrupted: bool,
+}
+
+struct BufferPool {
+    buffers: VecDeque<Vec<u8>>,
+}
+
+impl BufferPool {
+    fn new() -> Self {
+        let mut buffers = VecDeque::with_capacity(BUFFER_POOL_SIZE);
+        for _ in 0..BUFFER_POOL_SIZE {
+            buffers.push_back(Vec::with_capacity(1920 * 1080 * 3));
+        }
+        Self { buffers }
+    }
+
+    fn get_buffer(&mut self) -> Vec<u8> {
+        self.buffers
+            .pop_front()
+            .unwrap_or_else(|| Vec::with_capacity(1920 * 1080 * 3))
+    }
+
+    fn return_buffer(&mut self, mut buffer: Vec<u8>) {
+        if self.buffers.len() < BUFFER_POOL_SIZE {
+            buffer.clear();
+            self.buffers.push_back(buffer);
+        }
+    }
 }
 
 impl FrameCache {
@@ -63,7 +91,7 @@ impl FrameCache {
         self.corrupted = true;
     }
 
-    fn reset(&mut self, frame: Frame, sequence: u32) {
+    fn reset(&mut self, frame: Vec<u8>, sequence: u32) {
         self.last_frame = Some(frame.clone());
         self.reconstructed_frame = Some(frame);
         self.last_sequence = sequence;
@@ -77,6 +105,9 @@ fn create_delta_optimized(old_frame: &[u8], new_frame: &[u8]) -> Option<Vec<Delt
     }
 
     let mut deltas = Vec::new();
+    let mut total_delta_size = 0;
+    let threshold_size = (new_frame.len() as f32 * DELTA_THRESHOLD) as usize;
+
     let mut i = 0;
     let len = new_frame.len();
 
@@ -90,6 +121,7 @@ fn create_delta_optimized(old_frame: &[u8], new_frame: &[u8]) -> Option<Vec<Delt
         }
 
         let start = i;
+
         while i < len && old_frame[i] != new_frame[i] {
             i += 1;
         }
@@ -111,21 +143,17 @@ fn create_delta_optimized(old_frame: &[u8], new_frame: &[u8]) -> Option<Vec<Delt
             }
         }
 
+        let chunk_size = i - start;
+        total_delta_size += chunk_size + 8;
+
+        if total_delta_size >= threshold_size {
+            return None;
+        }
+
         deltas.push(DeltaChunk {
             offset: start as u32,
             data: new_frame[start..i].to_vec(),
         });
-    }
-
-    if deltas.is_empty() {
-        return Some(Vec::new());
-    }
-
-    let delta_size: usize = deltas.iter().map(|d| d.data.len() + 8).sum();
-    let threshold_size = (new_frame.len() as f32 * DELTA_THRESHOLD) as usize;
-
-    if delta_size >= threshold_size {
-        return None;
     }
 
     Some(deltas)
@@ -216,6 +244,7 @@ pub async fn udp_listener_loop(
     let mut buf = [0; 1500];
     let mut fragment_buffers: HashMap<StreamID, FragmentBuffer> = HashMap::new();
     let mut frame_caches: HashMap<StreamID, FrameCache> = HashMap::new();
+    let mut buffer_pool = BufferPool::new();
 
     loop {
         tokio::select! {
@@ -261,17 +290,17 @@ pub async fn udp_listener_loop(
                                 entry.expected_chunks = chunk_id + 1;
 
                                 if entry.chunks.len() == entry.expected_chunks as usize {
-                                    let mut frame_data = Vec::new();
+                                    let mut frame_data = buffer_pool.get_buffer();
                                     for chunk in entry.chunks.values() {
                                         frame_data.extend(chunk);
                                     }
 
                                     let cache = frame_caches.entry(sid.clone()).or_insert_with(FrameCache::new);
 
-                                    let final_frame = match entry.frame_type {
+                                    let final_frame_data = match entry.frame_type {
                                         FrameType::Full => {
                                             cache.reset(frame_data.clone(), sequence);
-                                            Some(frame_data)
+                                            Some(frame_data.clone())
                                         },
                                         FrameType::Delta => {
                                             if cache.corrupted {
@@ -305,12 +334,15 @@ pub async fn udp_listener_loop(
                                         FrameType::Heartbeat => None,
                                     };
 
-                                    if let Some(frame) = final_frame {
-                                        if let Ok(mut guard) = sid_to_frame_map.try_lock() {
-                                            guard.insert(sid.clone(), Some(frame));
+                                    if let Some(final_data) = final_frame_data {
+                                        if let Ok(frame) = Frame::from_bytes(&final_data) {
+                                            if let Ok(mut guard) = sid_to_frame_map.try_lock() {
+                                                guard.insert(sid.clone(), Some(frame));
+                                            }
                                         }
                                     }
 
+                                    buffer_pool.return_buffer(frame_data);
                                     fragment_buffers.remove(&sid);
                                 }
                             }
@@ -342,16 +374,17 @@ pub async fn udp_send_loop(
     full_sid: Vec<u8>,
     udp_send_loop_cancel_token: CancellationToken,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let mut last_frame: Option<Frame> = None;
+    let mut last_frame: Option<Vec<u8>> = None;
     let mut sequence: u32 = 0;
     let mut heartbeat_counter = 0;
+    let mut packet_buffer = Vec::with_capacity(CHUNK_SIZE + 100);
     const HEARTBEAT_INTERVAL: u32 = 30;
 
     loop {
         tokio::select! {
             _ = udp_send_loop_cancel_token.cancelled() => break,
             _ = camera_frame_channel_rx.changed() => {
-                let frame = camera_frame_channel_rx.borrow().clone();
+                let frame = camera_frame_channel_rx.borrow().to_bytes();
                 sequence = (sequence + 1) % SEQUENCE_WRAP;
 
                 let (frame_type, data_to_send) = if let Some(ref prev_frame) = last_frame {
@@ -380,12 +413,13 @@ pub async fn udp_send_loop(
                 last_frame = Some(frame);
 
                 if frame_type == FrameType::Heartbeat {
-                    let mut packet = full_sid.clone();
-                    packet.push(FrameType::Heartbeat as u8);
-                    packet.extend_from_slice(&sequence.to_be_bytes());
-                    packet.extend_from_slice(&0u32.to_be_bytes());
-                    packet.push(1);
-                    let _ = udp_stream.send(&packet).await;
+                    packet_buffer.clear();
+                    packet_buffer.extend_from_slice(&full_sid);
+                    packet_buffer.push(FrameType::Heartbeat as u8);
+                    packet_buffer.extend_from_slice(&sequence.to_be_bytes());
+                    packet_buffer.extend_from_slice(&0u32.to_be_bytes());
+                    packet_buffer.push(1);
+                    let _ = udp_stream.send(&packet_buffer).await;
                     continue;
                 }
 
@@ -393,14 +427,15 @@ pub async fn udp_send_loop(
                 let total_chunks = chunks.len();
 
                 for (i, chunk) in chunks.iter().enumerate() {
-                    let mut packet = full_sid.clone();
-                    packet.push(frame_type.clone() as u8);
-                    packet.extend_from_slice(&sequence.to_be_bytes());
-                    packet.extend_from_slice(&(i as u32).to_be_bytes());
-                    packet.push((i + 1 == total_chunks) as u8);
-                    packet.extend_from_slice(chunk);
+                    packet_buffer.clear();
+                    packet_buffer.extend_from_slice(&full_sid);
+                    packet_buffer.push(frame_type.clone() as u8);
+                    packet_buffer.extend_from_slice(&sequence.to_be_bytes());
+                    packet_buffer.extend_from_slice(&(i as u32).to_be_bytes());
+                    packet_buffer.push((i + 1 == total_chunks) as u8);
+                    packet_buffer.extend_from_slice(chunk);
 
-                    let _ = udp_stream.send(&packet).await;
+                    let _ = udp_stream.send(&packet_buffer).await;
                 }
             }
         }

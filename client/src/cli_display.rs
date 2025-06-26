@@ -104,14 +104,6 @@ impl CliDisplay {
         println!();
     }
 
-    pub fn print_current_user_left_room(room_name: &str) {
-        draw_box(
-            "Disconnected",
-            &[format!("You have left the room '{}'", room_name)],
-        );
-        println!();
-    }
-
     pub fn print_prompt() {
         print!("> ");
         stdout().flush().unwrap();

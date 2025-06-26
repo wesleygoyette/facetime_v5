@@ -16,7 +16,7 @@ impl PreCallInterface {
         tcp_stream: &mut TcpStream,
         current_username: &str,
         camera_index: &mut i32,
-    ) -> Result<Option<(String, Vec<u8>)>, Box<dyn Error + Send + Sync>> {
+    ) -> Result<Option<Vec<u8>>, Box<dyn Error + Send + Sync>> {
         let stdin = io::stdin();
         let mut reader = stdin.lock();
 
@@ -51,7 +51,7 @@ impl PreCallInterface {
         tcp_stream: &mut TcpStream,
         current_username: &str,
         camera_index: &mut i32,
-    ) -> Result<Option<(String, Vec<u8>)>, Box<dyn Error + Send + Sync>> {
+    ) -> Result<Option<Vec<u8>>, Box<dyn Error + Send + Sync>> {
         let lowercase_input = input.to_lowercase();
 
         match lowercase_input.as_str() {
@@ -261,7 +261,7 @@ async fn delete_room(
 async fn join_room(
     tcp_stream: &mut TcpStream,
     room_name: &str,
-) -> Result<Option<(String, Vec<u8>)>, Box<dyn Error + Send + Sync>> {
+) -> Result<Option<Vec<u8>>, Box<dyn Error + Send + Sync>> {
     TcpCommand::String(TcpCommandId::JoinRoom, room_name.to_string())
         .write_to_stream(tcp_stream)
         .await?;
@@ -282,7 +282,7 @@ async fn join_room(
             }
 
             println!("Successfully joined room '{}'.", room_name);
-            Ok(Some((room_name.to_string(), full_sid)))
+            Ok(Some(full_sid))
         }
         TcpCommand::String(TcpCommandId::ErrorResponse, error) => {
             eprintln!("{}", error);
