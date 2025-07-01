@@ -33,7 +33,6 @@ impl TcpHandler {
 
         *current_username_option = Some(current_username.clone());
         users.write().await.push(current_username.clone());
-        info!("{} has connected!", current_username);
 
         let (tcp_command_channel_tx, mut tcp_command_channel_rx) = broadcast::channel(16);
 
@@ -41,6 +40,8 @@ impl TcpHandler {
             .lock()
             .await
             .insert(current_username.clone(), tcp_command_channel_tx);
+
+        info!("User '{}' has connected", current_username);
 
         loop {
             tokio::select! {
@@ -97,8 +98,6 @@ impl TcpHandler {
                 .write_to_stream(stream)
                 .await?;
 
-            info!("Client sent invalid username");
-
             return Ok(None);
         }
 
@@ -109,8 +108,6 @@ impl TcpHandler {
                 .write_to_stream(stream)
                 .await?;
 
-            info!("Client sent invalid username");
-
             return Ok(None);
         }
 
@@ -119,8 +116,6 @@ impl TcpHandler {
             TcpCommand::String(TcpCommandId::ErrorResponse, error_message.to_string())
                 .write_to_stream(stream)
                 .await?;
-
-            info!("Client sent invalid username");
 
             return Ok(None);
         }

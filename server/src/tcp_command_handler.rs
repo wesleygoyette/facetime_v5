@@ -85,8 +85,6 @@ impl TcpCommandHandler {
             guard.clone()
         };
 
-        info!("Sending user list with {} users", users_snapshot.len());
-
         TcpCommand::StringList(TcpCommandId::UserList, users_snapshot)
             .write_to_stream(stream)
             .await
@@ -105,8 +103,6 @@ impl TcpCommandHandler {
                 .collect::<Vec<_>>()
         };
 
-        info!("Sending room list with {} rooms", room_names.len());
-
         TcpCommand::StringList(TcpCommandId::RoomList, room_names)
             .write_to_stream(stream)
             .await
@@ -119,12 +115,10 @@ impl TcpCommandHandler {
         room_name: &str,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         if room_name.trim().is_empty() {
-            info!("Client attempted to create room with empty name");
             return Self::send_error_response(stream, "Room name cannot be empty").await;
         }
 
         if room_name.len() > MAX_NAME_LENGTH {
-            info!("Client attempted to create room with name too long");
             return Self::send_error_response(
                 stream,
                 &format!(
@@ -136,7 +130,6 @@ impl TcpCommandHandler {
         }
 
         if !is_valid_name(room_name) {
-            info!("Client attempted to create room with an invalid name");
             return Self::send_error_response(
                 stream,
                 "Room name must contain only letters, numbers, underscores (_), or hyphens (-).",
@@ -171,10 +164,7 @@ impl TcpCommandHandler {
                         format!("Failed to send create room success response: {}", e).into()
                     })
             }
-            Err(msg) => {
-                info!("Client attempted to create duplicate room: {}", room_name);
-                Self::send_error_response(stream, &msg).await
-            }
+            Err(msg) => Self::send_error_response(stream, &msg).await,
         }
     }
 
@@ -184,7 +174,6 @@ impl TcpCommandHandler {
         room_name: &str,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         if room_name.trim().is_empty() {
-            info!("Client attempted to delete room with empty name");
             return Self::send_error_response(stream, "Room name cannot be empty").await;
         }
 
@@ -226,10 +215,7 @@ impl TcpCommandHandler {
                         format!("Failed to send delete room success response: {}", e).into()
                     })
             }
-            Err(msg) => {
-                info!("Client failed to delete room '{}': {}", room_name, msg);
-                Self::send_error_response(stream, &msg).await
-            }
+            Err(msg) => Self::send_error_response(stream, &msg).await,
         }
     }
 
@@ -242,7 +228,6 @@ impl TcpCommandHandler {
         username_to_tcp_command_tx: Arc<Mutex<HashMap<String, broadcast::Sender<TcpCommand>>>>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         if room_name.trim().is_empty() {
-            log::info!("Client attempted to join room with empty name");
             return Self::send_error_response(stream, "Room name cannot be empty").await;
         }
 
@@ -298,7 +283,6 @@ impl TcpCommandHandler {
                 }
             }
             None => {
-                log::info!("Client tried to join nonexistent room: '{}'", room_name);
                 Self::send_error_response(stream, &format!("Room '{}' does not exist", room_name))
                     .await?;
             }

@@ -64,7 +64,9 @@ impl WeSFU {
 
                 result = self.tcp_listener.accept() => {
 
-                    let tcp_socket = result?.0;
+                    let (stream, addr) = result?;
+
+                    info!("Incoming TCP connection established from {}", addr);
 
                     tokio::spawn(async move {
 
@@ -73,7 +75,7 @@ impl WeSFU {
                         let mut current_username_option = None;
                         let mut current_sid_option = None;
 
-                        if let Err(e) = TcpHandler::handle_stream(tcp_socket, &mut current_username_option, &mut current_sid_option, users.clone(), room_map.clone(), username_to_tcp_command_tx.clone()).await {
+                        if let Err(e) = TcpHandler::handle_stream(stream, &mut current_username_option, &mut current_sid_option, users.clone(), room_map.clone(), username_to_tcp_command_tx.clone()).await {
 
                             error!("Error handling TcpSocket: {}", e);
                         }
@@ -108,7 +110,7 @@ impl WeSFU {
                                 }
                             }
 
-                            info!("{} has disconnected", current_username);
+                            info!("User '{}' has disconnected (address: {})", current_username, addr);
                         }
 
                     });
