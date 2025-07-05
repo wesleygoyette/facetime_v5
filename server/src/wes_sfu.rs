@@ -64,9 +64,7 @@ impl WeSFU {
 
                 result = self.tcp_listener.accept() => {
 
-                    let (stream, addr) = result?;
-
-                    info!("Incoming TCP connection established from {}", addr);
+                    let stream = result?.0;
 
                     tokio::spawn(async move {
 
@@ -88,14 +86,14 @@ impl WeSFU {
                             .await
                             .remove(&current_username);
 
-                            if let Some(sid) = current_sid_option {
+                            if let Some((video_sid, audio_sid)) = current_sid_option {
 
                                 for room in room_map.write().await.values_mut() {
 
-                                    let mut stream_id_to_socket_addr_guard = room.stream_id_to_socket_addr.lock().await;
-                                    if stream_id_to_socket_addr_guard.contains_key(&sid) {
+                                    let mut stream_id_to_socket_addr_guard = room.video_stream_id_to_socket_addr.lock().await;
+                                    if stream_id_to_socket_addr_guard.contains_key(&video_sid) {
 
-                                        stream_id_to_socket_addr_guard.remove(&sid);
+                                        stream_id_to_socket_addr_guard.remove(&video_sid);
 
                                         room.users.retain(|user| user != &current_username);
 
@@ -103,16 +101,17 @@ impl WeSFU {
 
                                             if let Some(tx) = username_to_tcp_command_tx.lock().await.get(&user) {
 
-                                                let _ = tx.send(TcpCommand::Bytes(TcpCommandId::OtherUserLeftRoom, sid.to_vec()));
+                                                let _ = tx.send(TcpCommand::Bytes(TcpCommandId::OtherUserLeftRoom, video_sid.to_vec()));
                                             }
                                         }
                                     }
+                                    let mut stream_id_to_socket_addr_guard = room.audio_stream_id_to_socket_addr.lock().await;
+                                    stream_id_to_socket_addr_guard.remove(&audio_sid);
                                 }
                             }
 
-                            info!("User '{}' has disconnected (address: {})", current_username, addr);
+                            info!("{} has disconnected", current_username);
                         }
-
                     });
                 }
             }

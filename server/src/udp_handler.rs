@@ -194,29 +194,77 @@ impl UdpHandler {
 
         to_addrs.clear();
 
-        let needs_update = {
+        let (map_type, needs_update) = {
             let room_map_read = room_map.read().await;
-            if let Some(room) = room_map_read.get(&rid) {
-                let stream_map = room.stream_id_to_socket_addr.lock().await;
 
-                for (to_sid, to_addr_option) in stream_map.iter() {
-                    if to_sid != &sid {
-                        if let Some(to_addr) = to_addr_option {
-                            to_addrs.push(*to_addr);
+            if let Some(room) = room_map_read.get(&rid) {
+                let video_map = room.video_stream_id_to_socket_addr.lock().await;
+                if video_map.contains_key(&sid) {
+                    for (to_sid, to_addr_option) in video_map.iter() {
+                        if to_sid != &sid {
+                            if let Some(to_addr) = to_addr_option {
+                                to_addrs.push(*to_addr);
+                            }
                         }
                     }
+                    let needs_update = video_map.get(&sid).map_or(true, |entry| entry.is_none());
+                    (Some("video"), needs_update)
+                } else {
+                    drop(video_map);
+                    let audio_map = room.audio_stream_id_to_socket_addr.lock().await;
+                    if audio_map.contains_key(&sid) {
+                        for (to_sid, to_addr_option) in audio_map.iter() {
+                            if to_sid != &sid {
+                                if let Some(to_addr) = to_addr_option {
+                                    to_addrs.push(*to_addr);
+                                }
+                            }
+                        }
+                        let needs_update =
+                            audio_map.get(&sid).map_or(true, |entry| entry.is_none());
+                        (Some("audio"), needs_update)
+                    } else {
+                        (None, false)
+                    }
                 }
-
-                stream_map.get(&sid).map_or(true, |entry| entry.is_none())
             } else {
-                return;
+                (None, false)
             }
         };
+
+        if map_type.is_none() {
+            return;
+        }
 
         if needs_update {
             let mut room_map_write = room_map.write().await;
             if let Some(room) = room_map_write.get_mut(&rid) {
-                let mut stream_map = room.stream_id_to_socket_addr.lock().await;
+                match map_type {
+                    Some("video") => {
+                        let mut video_map = room.video_stream_id_to_socket_addr.lock().await;
+                        if let Some(entry) = video_map.get_mut(&sid) {
+                            if entry.is_none() {
+                                *entry = Some(from_addr);
+                            }
+                        }
+                    }
+                    Some("audio") => {
+                        let mut audio_map = room.audio_stream_id_to_socket_addr.lock().await;
+                        if let Some(entry) = audio_map.get_mut(&sid) {
+                            if entry.is_none() {
+                                *entry = Some(from_addr);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if needs_update {
+            let mut room_map_write = room_map.write().await;
+            if let Some(room) = room_map_write.get_mut(&rid) {
+                let mut stream_map = room.video_stream_id_to_socket_addr.lock().await;
                 if let Some(entry) = stream_map.get_mut(&sid) {
                     if entry.is_none() {
                         *entry = Some(from_addr);

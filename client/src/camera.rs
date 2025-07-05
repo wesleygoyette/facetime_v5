@@ -88,8 +88,7 @@ impl Camera {
                     return Err("Empty frame captured".into());
                 }
 
-                if let Err(e) = flip(&flipped, &mut self.frame, 1) {
-                    eprintln!("Flip failed, using original frame: {}", e);
+                if let Err(_) = flip(&flipped, &mut self.frame, 1) {
                     self.frame = flipped;
                 }
 

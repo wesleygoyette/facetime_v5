@@ -371,7 +371,7 @@ pub async fn udp_listener_loop(
 pub async fn udp_send_loop(
     udp_stream: Arc<UdpSocket>,
     mut camera_frame_channel_rx: watch::Receiver<Frame>,
-    full_sid: Vec<u8>,
+    video_sid: Vec<u8>,
     udp_send_loop_cancel_token: CancellationToken,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut last_frame: Option<Vec<u8>> = None;
@@ -414,7 +414,7 @@ pub async fn udp_send_loop(
 
                 if frame_type == FrameType::Heartbeat {
                     packet_buffer.clear();
-                    packet_buffer.extend_from_slice(&full_sid);
+                    packet_buffer.extend_from_slice(&video_sid);
                     packet_buffer.push(FrameType::Heartbeat as u8);
                     packet_buffer.extend_from_slice(&sequence.to_be_bytes());
                     packet_buffer.extend_from_slice(&0u32.to_be_bytes());
@@ -428,7 +428,7 @@ pub async fn udp_send_loop(
 
                 for (i, chunk) in chunks.iter().enumerate() {
                     packet_buffer.clear();
-                    packet_buffer.extend_from_slice(&full_sid);
+                    packet_buffer.extend_from_slice(&video_sid);
                     packet_buffer.push(frame_type.clone() as u8);
                     packet_buffer.extend_from_slice(&sequence.to_be_bytes());
                     packet_buffer.extend_from_slice(&(i as u32).to_be_bytes());

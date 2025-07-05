@@ -16,7 +16,7 @@ impl PreCallInterface {
         tcp_stream: &mut TcpStream,
         current_username: &str,
         camera_index: &mut i32,
-    ) -> Result<Option<Vec<u8>>, Box<dyn Error + Send + Sync>> {
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>, Box<dyn Error + Send + Sync>> {
         let stdin = io::stdin();
         let mut reader = stdin.lock();
 
@@ -51,7 +51,7 @@ impl PreCallInterface {
         tcp_stream: &mut TcpStream,
         current_username: &str,
         camera_index: &mut i32,
-    ) -> Result<Option<Vec<u8>>, Box<dyn Error + Send + Sync>> {
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>, Box<dyn Error + Send + Sync>> {
         let lowercase_input = input.to_lowercase();
 
         match lowercase_input.as_str() {
@@ -261,7 +261,7 @@ async fn delete_room(
 async fn join_room(
     tcp_stream: &mut TcpStream,
     room_name: &str,
-) -> Result<Option<Vec<u8>>, Box<dyn Error + Send + Sync>> {
+) -> Result<Option<(Vec<u8>, Vec<u8>)>, Box<dyn Error + Send + Sync>> {
     TcpCommand::String(TcpCommandId::JoinRoom, room_name.to_string())
         .write_to_stream(tcp_stream)
         .await?;
@@ -276,13 +276,17 @@ async fn join_room(
     };
 
     match received_command {
-        TcpCommand::Bytes(TcpCommandId::JoinRoomSuccess, full_sid) => {
-            if full_sid.len() != RoomID::default().len() + StreamID::default().len() {
+        TcpCommand::Bytes(TcpCommandId::JoinRoomSuccess, both_sids) => {
+            let fsid_len = RoomID::default().len() + StreamID::default().len();
+
+            if both_sids.len() != fsid_len * 2 {
                 return Err("Unexpected payload length from server during join_room".into());
             }
 
-            println!("Successfully joined room '{}'.", room_name);
-            Ok(Some(full_sid))
+            let video_sid = &both_sids[..fsid_len];
+            let audio_sid = &both_sids[fsid_len..];
+
+            Ok(Some((video_sid.to_vec(), audio_sid.to_vec())))
         }
         TcpCommand::String(TcpCommandId::ErrorResponse, error) => {
             eprintln!("{}", error);

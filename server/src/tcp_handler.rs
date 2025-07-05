@@ -19,7 +19,7 @@ impl TcpHandler {
     pub async fn handle_stream(
         mut stream: TcpStream,
         current_username_option: &mut Option<String>,
-        current_sid_option: &mut Option<StreamID>,
+        current_sid_option: &mut Option<(StreamID, StreamID)>,
         users: Arc<RwLock<Vec<String>>>,
         room_map: Arc<RwLock<HashMap<RoomID, Room>>>,
         username_to_tcp_command_tx: Arc<Mutex<HashMap<String, broadcast::Sender<TcpCommand>>>>,

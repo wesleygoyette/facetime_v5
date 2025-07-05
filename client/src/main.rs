@@ -1,9 +1,11 @@
+mod audio_streamer;
 mod call_interface;
 mod camera;
 mod cli_display;
 mod client;
 mod frame;
 mod frame_generator;
+mod jitter_buffer;
 mod pre_call_interface;
 mod renderer;
 mod udp_handler;

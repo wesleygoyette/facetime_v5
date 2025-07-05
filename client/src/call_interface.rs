@@ -16,6 +16,7 @@ use tokio::{
 };
 
 use crate::{
+    audio_streamer::AudioStreamer,
     camera::Camera,
     frame::{Frame, combine_frames_with_buffers, detect_true_color},
     renderer::Renderer,
@@ -44,12 +45,16 @@ pub struct CallInterface;
 
 impl CallInterface {
     pub async fn run(
-        full_sid: &[u8],
+        server_udp_addr: &str,
+        video_sid: &[u8],
+        audio_sid: &[u8],
         tcp_stream: &mut TcpStream,
         udp_stream: UdpSocket,
         camera_index: i32,
         color_enabled: bool,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        AudioStreamer::stream(server_udp_addr, audio_sid.to_vec()).await?;
+
         println!("Starting camera ASCII feed... Press Ctrl+C to exit");
 
         let mut stdout = stdout();
@@ -94,7 +99,7 @@ impl CallInterface {
         let mut udp_send_loop_task = tokio::spawn(udp_send_loop(
             udp_stream,
             camera_frame_channel_tx.subscribe(),
-            full_sid.to_vec(),
+            video_sid.to_vec(),
             cancel_token.clone(),
         ));
 

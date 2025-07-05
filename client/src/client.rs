@@ -31,12 +31,14 @@ impl Client {
             PreCallInterface::run(&mut tcp_stream, username, camera_index).await?;
 
         match call_info_option {
-            Some(full_sid) => {
+            Some((video_sid, audio_sid)) => {
                 let udp_stream = UdpSocket::bind("0.0.0.0:0").await?;
                 udp_stream.connect(&server_udp_addr).await?;
 
                 if let Err(e) = CallInterface::run(
-                    &full_sid,
+                    &server_udp_addr,
+                    &video_sid,
+                    &audio_sid,
                     &mut tcp_stream,
                     udp_stream,
                     *camera_index,
