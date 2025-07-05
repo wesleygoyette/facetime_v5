@@ -53,8 +53,6 @@ impl CallInterface {
         camera_index: i32,
         color_enabled: bool,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        AudioStreamer::stream(server_udp_addr, audio_sid.to_vec()).await?;
-
         println!("Starting camera ASCII feed... Press Ctrl+C to exit");
 
         let mut stdout = stdout();
@@ -67,17 +65,6 @@ impl CallInterface {
             Clear(ClearType::All)
         )?;
         enable_raw_mode()?;
-        let _guard = scopeguard::guard((), |_| {
-            let _ = disable_raw_mode();
-            let _ = execute!(
-                stdout,
-                LeaveAlternateScreen,
-                Show,
-                cursor::MoveTo(0, 0),
-                Clear(ClearType::All),
-                cursor::MoveTo(0, 0)
-            );
-        });
 
         let cancel_token = CancellationToken::new();
 
@@ -90,62 +77,74 @@ impl CallInterface {
             data: Arc::new(Vec::new()),
         });
 
-        let mut udp_listener_loop_task = tokio::spawn(udp_listener_loop(
+        let audio_loop_task = tokio::spawn(audio_loop(
+            server_udp_addr.to_string(),
+            audio_sid.to_vec(),
+            cancel_token.clone(),
+        ));
+
+        let udp_listener_loop_task = tokio::spawn(udp_listener_loop(
             udp_stream.clone(),
             sid_to_frame_map.clone(),
             cancel_token.clone(),
         ));
 
-        let mut udp_send_loop_task = tokio::spawn(udp_send_loop(
+        let udp_send_loop_task = tokio::spawn(udp_send_loop(
             udp_stream,
             camera_frame_channel_tx.subscribe(),
             video_sid.to_vec(),
             cancel_token.clone(),
         ));
 
-        let mut render_loop_task = tokio::spawn(render_loop(
+        let render_loop_task = tokio::spawn(render_loop(
             camera_frame_channel_rx,
             sid_to_frame_map.clone(),
             color_enabled,
             cancel_token.clone(),
         ));
 
-        let mut camera_loop_task = tokio::spawn(camera_loop(
+        let camera_loop_task = tokio::spawn(camera_loop(
             camera_frame_channel_tx,
             camera_index,
             cancel_token.clone(),
         ));
 
-        let mut user_input_loop_task = tokio::spawn(user_input_loop(cancel_token.clone()));
+        let user_input_loop_task = tokio::spawn(user_input_loop(cancel_token.clone()));
 
         let result = tokio::select! {
-            result = &mut user_input_loop_task => result?,
-            result = &mut camera_loop_task => result?,
-            result = &mut render_loop_task => result?,
-            result = &mut udp_listener_loop_task => result?,
-            result = &mut udp_send_loop_task => result?,
+            result = user_input_loop_task => result?,
+            result = camera_loop_task => result?,
+            result = render_loop_task => result?,
+            result = udp_listener_loop_task => result?,
+            result = udp_send_loop_task => result?,
+            result = audio_loop_task => result?,
             result = tcp_loop(tcp_stream, sid_to_frame_map.clone(), cancel_token.clone()) => result
         };
 
         cancel_token.cancel();
 
-        let cleanup_tasks = [
-            user_input_loop_task,
-            camera_loop_task,
-            render_loop_task,
-            udp_listener_loop_task,
-            udp_send_loop_task,
-        ];
+        // Cleanup terminal state
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            stdout,
+            LeaveAlternateScreen,
+            Show,
+            cursor::MoveTo(0, 0),
+            Clear(ClearType::All),
+            cursor::MoveTo(0, 0)
+        );
 
-        let cleanup_timeout = Duration::from_millis(500);
-        for task in cleanup_tasks {
-            if !task.is_finished() {
-                let _ = tokio::time::timeout(cleanup_timeout, task).await;
-            }
-        }
-
-        result
+        Ok(result?)
     }
+}
+
+async fn audio_loop(
+    server_udp_addr: String,
+    audio_sid: Vec<u8>,
+    cancel_token: CancellationToken,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    AudioStreamer::stream(server_udp_addr, audio_sid, cancel_token).await?;
+    Ok(())
 }
 
 async fn camera_loop(

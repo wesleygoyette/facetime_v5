@@ -1,9 +1,11 @@
+use crate::jitter_buffer::JitterBuffer;
+use core::error::Error;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, StreamConfig};
 use std::sync::{Arc, Mutex};
 use tokio::net::UdpSocket;
-
-use crate::jitter_buffer::JitterBuffer;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 pub struct AudioStreamer;
 
@@ -66,10 +68,40 @@ impl SimpleResampler {
 }
 
 impl AudioStreamer {
-    pub async fn stream(server_udp_addr: &str, fsid: Vec<u8>) -> Result<(), anyhow::Error> {
+    pub async fn stream(
+        server_udp_addr: String, // Changed to owned String
+        fsid: Vec<u8>,
+        cancel_token: CancellationToken, // Added cancellation token
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Spawn the audio task on a blocking thread pool to avoid Send issues
+        let handle = tokio::task::spawn_blocking(move || {
+            Self::run_audio_streams(server_udp_addr, fsid, cancel_token)
+        });
+
+        // Wait for the task to complete
+        handle.await??;
+        Ok(())
+    }
+
+    fn run_audio_streams(
+        server_udp_addr: String,
+        fsid: Vec<u8>,
+        cancel_token: CancellationToken,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Create a new async runtime for the blocking task
+        let rt = tokio::runtime::Runtime::new()?;
+
+        rt.block_on(async { Self::stream_internal(server_udp_addr, fsid, cancel_token).await })
+    }
+
+    async fn stream_internal(
+        server_udp_addr: String,
+        fsid: Vec<u8>,
+        cancel_token: CancellationToken,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Create UDP socket for sending audio data
         let udp_socket = UdpSocket::bind("0.0.0.0:0").await?;
-        udp_socket.connect(server_udp_addr).await?;
+        udp_socket.connect(&server_udp_addr).await?;
         let udp_socket = Arc::new(udp_socket);
 
         let host = cpal::default_host();
@@ -77,12 +109,10 @@ impl AudioStreamer {
         let input_device = host.default_input_device().ok_or_else(|| {
             anyhow::anyhow!("No default input device found. Please check your microphone setup.")
         })?;
-        println!("Using audio input device: {}", input_device.name()?);
 
         let output_device = host.default_output_device().ok_or_else(|| {
             anyhow::anyhow!("No default output device found. Please check your speaker setup.")
         })?;
-        println!("Using audio output device: {}", output_device.name()?);
 
         let mut supported_input_configs = input_device.supported_input_configs()?;
         let input_config_range = supported_input_configs
@@ -115,11 +145,14 @@ impl AudioStreamer {
             target_sample_rate,
         )));
 
-        // Input stream callback - convert to mono, resample, and send audio data via UDP
+        // Create channel for sending audio data from callback to async task
+        let (audio_tx, mut audio_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+
+        // Input stream callback - convert to mono, resample, and send audio data via channel
         let input_data_fn = {
-            let send_socket = udp_socket.clone();
             let seq_num = sequence_number_clone;
             let resampler = resampler.clone();
+            let fsid = fsid.clone();
 
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
                 let mut seq = seq_num.lock().unwrap();
@@ -159,64 +192,82 @@ impl AudioStreamer {
                         packet.extend_from_slice(&sample.to_ne_bytes());
                     }
 
-                    // Send packet (non-blocking)
-                    if let Err(e) = send_socket.try_send(&packet) {
-                        eprintln!("Failed to send UDP packet: {}", e);
-                    }
+                    // Send packet via channel (non-blocking)
+                    if let Err(_) = audio_tx.send(packet) {}
                 }
             }
         };
 
-        let input_err_fn = |err| eprintln!("An error occurred on the input stream: {}", err);
+        let input_err_fn = |_| {};
 
         let input_stream =
             input_device.build_input_stream(&config, input_data_fn, input_err_fn, None)?;
         input_stream.play()?;
 
-        // Network statistics
+        // Spawn task to send audio packets via UDP
+        let send_task = {
+            let send_socket = udp_socket.clone();
+            let cancel_token = cancel_token.clone();
+
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = cancel_token.cancelled() => break,
+                        packet = audio_rx.recv() => {
+                            match packet {
+                                Some(data) => {
+                                    let _ = send_socket.send(&data).await;
+                                }
+                                None => break,
+                            }
+                        }
+                    }
+                }
+            })
+        };
 
         // Spawn task to receive audio data and put it in the jitter buffer
         let recv_task = {
             let recv_socket = udp_socket.clone();
             let jitter_buffer = jitter_buffer.clone();
+            let cancel_token = cancel_token.clone();
 
             tokio::spawn(async move {
                 let mut buf = vec![0u8; 4096]; // Buffer for multiple f32 samples
 
                 loop {
-                    match recv_socket.recv(&mut buf).await {
-                        Ok(size) => {
-                            if size < 12 {
-                                eprintln!("Received packet too small: {} bytes", size);
-                                continue;
-                            }
+                    tokio::select! {
+                        _ = cancel_token.cancelled() => break,
+                        result = recv_socket.recv(&mut buf) => {
+                            match result {
+                                Ok(size) => {
+                                    if size < 12 {
+                                        continue;
+                                    }
 
-                            let audio_data = &buf[12..size];
-                            if audio_data.len() % 4 != 0 {
-                                eprintln!(
-                                    "Audio data size {} is not divisible by 4",
-                                    audio_data.len()
-                                );
-                                continue;
-                            }
+                                    let audio_data = &buf[12..size];
+                                    if audio_data.len() % 4 != 0 {
+                                        continue;
+                                    }
 
-                            // Convert bytes back to f32 samples
-                            let mut samples = Vec::with_capacity(audio_data.len() / 4);
-                            for chunk in audio_data.chunks_exact(4) {
-                                let sample_bytes: [u8; 4] = chunk.try_into().unwrap();
-                                let sample = f32::from_ne_bytes(sample_bytes);
-                                samples.push(sample);
-                            }
+                                    // Convert bytes back to f32 samples
+                                    let mut samples = Vec::with_capacity(audio_data.len() / 4);
+                                    for chunk in audio_data.chunks_exact(4) {
+                                        let sample_bytes: [u8; 4] = chunk.try_into().unwrap();
+                                        let sample = f32::from_ne_bytes(sample_bytes);
+                                        samples.push(sample);
+                                    }
 
-                            // Add to jitter buffer
-                            {
-                                let mut buffer_lock = jitter_buffer.lock().unwrap();
-                                buffer_lock.add_samples(&samples);
+                                    // Add to jitter buffer
+                                    {
+                                        let mut buffer_lock = jitter_buffer.lock().unwrap();
+                                        buffer_lock.add_samples(&samples);
+                                    }
+                                }
+                                Err(_) => {
+                                    break;
+                                }
                             }
-                        }
-                        Err(e) => {
-                            eprintln!("Failed to receive UDP packet: {}", e);
-                            break;
                         }
                     }
                 }
@@ -242,9 +293,7 @@ impl AudioStreamer {
             }
         };
 
-        let output_err_fn = |err| {
-            eprintln!("An error occurred on the output stream: {}", err);
-        };
+        let output_err_fn = |_| {};
 
         let output_stream = output_device.build_output_stream(
             &output_config,
@@ -254,12 +303,11 @@ impl AudioStreamer {
         )?;
         output_stream.play()?;
 
-        // Keep the main thread alive
+        // Keep the streams alive until cancelled
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-            }
-            _ = recv_task => {
-            }
+            _ = cancel_token.cancelled() => {},
+            _ = send_task => {},
+            _ = recv_task => {},
         }
 
         Ok(())
