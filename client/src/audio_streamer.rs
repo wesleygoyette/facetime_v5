@@ -67,11 +67,95 @@ impl SimpleResampler {
     }
 }
 
+// Simple echo cancellation using adaptive filtering
+struct EchoCanceller {
+    filter_length: usize,
+    filter: Vec<f32>,
+    reference_buffer: Vec<f32>,
+    step_size: f32,
+}
+
+impl EchoCanceller {
+    fn new(filter_length: usize) -> Self {
+        Self {
+            filter_length,
+            filter: vec![0.0; filter_length],
+            reference_buffer: vec![0.0; filter_length],
+            step_size: 0.01, // LMS adaptation step size
+        }
+    }
+
+    fn process(&mut self, input: f32, reference: f32) -> f32 {
+        // Shift reference buffer
+        self.reference_buffer.rotate_right(1);
+        self.reference_buffer[0] = reference;
+
+        // Calculate echo estimate
+        let echo_estimate: f32 = self
+            .filter
+            .iter()
+            .zip(self.reference_buffer.iter())
+            .map(|(w, r)| w * r)
+            .sum();
+
+        // Remove echo from input
+        let output = input - echo_estimate;
+
+        // Update filter coefficients using LMS algorithm
+        let error = output;
+        for i in 0..self.filter_length {
+            self.filter[i] += self.step_size * error * self.reference_buffer[i];
+        }
+
+        output
+    }
+}
+
+// Voice Activity Detection
+struct VoiceActivityDetector {
+    threshold: f32,
+    energy_history: Vec<f32>,
+    noise_floor: f32,
+}
+
+impl VoiceActivityDetector {
+    fn new() -> Self {
+        Self {
+            threshold: 0.02, // Adjust based on your environment
+            energy_history: Vec::new(),
+            noise_floor: 0.01,
+        }
+    }
+
+    fn detect(&mut self, samples: &[f32]) -> bool {
+        // Calculate RMS energy
+        let energy = (samples.iter().map(|x| x * x).sum::<f32>() / samples.len() as f32).sqrt();
+
+        // Update noise floor estimate
+        if self.energy_history.len() < 100 {
+            self.energy_history.push(energy);
+        } else {
+            self.energy_history.remove(0);
+            self.energy_history.push(energy);
+        }
+
+        // Calculate noise floor as 10th percentile
+        let mut sorted = self.energy_history.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        if sorted.len() > 10 {
+            self.noise_floor = sorted[sorted.len() / 10];
+        }
+
+        // Voice activity if energy is significantly above noise floor
+        energy > self.noise_floor * 3.0 && energy > self.threshold
+    }
+}
+
 impl AudioStreamer {
     pub async fn stream(
-        server_udp_addr: String, // Changed to owned String
+        server_udp_addr: String,
         fsid: Vec<u8>,
-        cancel_token: CancellationToken, // Added cancellation token
+        cancel_token: CancellationToken,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Spawn the audio task on a blocking thread pool to avoid Send issues
         let handle = tokio::task::spawn_blocking(move || {
@@ -145,6 +229,11 @@ impl AudioStreamer {
             target_sample_rate,
         )));
 
+        // Echo cancellation and voice activity detection
+        let echo_canceller = Arc::new(Mutex::new(EchoCanceller::new(512))); // 512 taps
+        let vad = Arc::new(Mutex::new(VoiceActivityDetector::new()));
+        let reference_audio = Arc::new(Mutex::new(Vec::<f32>::new()));
+
         // Create channel for sending audio data from callback to async task
         let (audio_tx, mut audio_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
@@ -152,20 +241,16 @@ impl AudioStreamer {
         let input_data_fn = {
             let seq_num = sequence_number_clone;
             let resampler = resampler.clone();
+            let echo_canceller = echo_canceller.clone();
+            let vad = vad.clone();
+            let reference_audio = reference_audio.clone();
             let fsid = fsid.clone();
 
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                let mut seq = seq_num.lock().unwrap();
-                *seq = seq.wrapping_add(1);
-                let current_seq = *seq;
-                drop(seq);
-
                 // Convert to mono first
                 let mono_data = if channels == 1 {
-                    // Already mono
                     data.to_vec()
                 } else {
-                    // Convert multi-channel to mono by averaging
                     let mut mono = Vec::with_capacity(data.len() / channels as usize);
                     for chunk in data.chunks_exact(channels as usize) {
                         let avg = chunk.iter().sum::<f32>() / channels as f32;
@@ -180,20 +265,49 @@ impl AudioStreamer {
                     resampler_lock.resample(&mono_data)
                 };
 
-                // Only send if we have resampled data
-                if !resampled_data.is_empty() {
+                if resampled_data.is_empty() {
+                    return;
+                }
+
+                // Apply echo cancellation
+                let echo_cancelled_data = {
+                    let mut echo_canceller_lock = echo_canceller.lock().unwrap();
+                    let reference_lock = reference_audio.lock().unwrap();
+
+                    let mut processed = Vec::with_capacity(resampled_data.len());
+                    for (i, &sample) in resampled_data.iter().enumerate() {
+                        let reference = reference_lock.get(i).copied().unwrap_or(0.0);
+                        let processed_sample = echo_canceller_lock.process(sample, reference);
+                        processed.push(processed_sample);
+                    }
+                    processed
+                };
+
+                // Apply voice activity detection
+                let should_transmit = {
+                    let mut vad_lock = vad.lock().unwrap();
+                    vad_lock.detect(&echo_cancelled_data)
+                };
+
+                // Only transmit if voice activity is detected
+                if should_transmit {
+                    let mut seq = seq_num.lock().unwrap();
+                    *seq = seq.wrapping_add(1);
+                    let current_seq = *seq;
+                    drop(seq);
+
                     // Create packet with sequence number header
-                    let mut packet = Vec::with_capacity(12 + resampled_data.len() * 4);
+                    let mut packet = Vec::with_capacity(12 + echo_cancelled_data.len() * 4);
                     packet.extend_from_slice(&fsid);
                     packet.extend_from_slice(&current_seq.to_ne_bytes());
 
-                    // Add resampled audio data
-                    for &sample in &resampled_data {
+                    // Add processed audio data
+                    for &sample in &echo_cancelled_data {
                         packet.extend_from_slice(&sample.to_ne_bytes());
                     }
 
                     // Send packet via channel (non-blocking)
-                    if let Err(_) = audio_tx.send(packet) {}
+                    let _ = audio_tx.send(packet);
                 }
             }
         };
@@ -233,7 +347,7 @@ impl AudioStreamer {
             let cancel_token = cancel_token.clone();
 
             tokio::spawn(async move {
-                let mut buf = vec![0u8; 4096]; // Buffer for multiple f32 samples
+                let mut buf = vec![0u8; 4096];
 
                 loop {
                     tokio::select! {
@@ -282,13 +396,25 @@ impl AudioStreamer {
 
         let output_data_fn = {
             let jitter_buffer = jitter_buffer.clone();
+            let reference_audio = reference_audio.clone();
 
             move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 let mut buffer = jitter_buffer.lock().unwrap();
                 buffer.adaptive_adjustment();
 
+                // Store reference audio for echo cancellation
+                let mut reference_samples = Vec::with_capacity(output.len());
+
                 for sample in output.iter_mut() {
-                    *sample = buffer.get_sample(); // Already f32
+                    let audio_sample = buffer.get_sample();
+                    *sample = audio_sample * 0.7; // Reduce output volume to minimize feedback
+                    reference_samples.push(audio_sample);
+                }
+
+                // Update reference audio buffer
+                {
+                    let mut reference_lock = reference_audio.lock().unwrap();
+                    *reference_lock = reference_samples;
                 }
             }
         };
